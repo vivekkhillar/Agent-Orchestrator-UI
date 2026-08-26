@@ -1,0 +1,14 @@
+# PostgreSQL Database Dockerfile with init.sql pre-loaded
+FROM postgres:16-alpine
+
+# Set default PostgreSQL environment variables
+ENV POSTGRES_USER=postgres
+ENV POSTGRES_PASSWORD=postgrespassword
+ENV POSTGRES_DB=banking_db
+
+# Copy schema and seed script to PostgreSQL entrypoint
+# PostgreSQL automatically executes all *.sql and *.sh scripts inside this directory on container startup
+COPY init.sql /docker-entrypoint-initdb.d/init.sql
+
+# Expose PostgreSQL default port
+EXPOSE 5432

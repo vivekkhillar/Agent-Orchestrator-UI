@@ -1,0 +1,6 @@
+{
+  "name": "Multi-Agent Office Harness",
+  "description": "Multi-agent banking orchestrator with Boss EVA, dynamic account ID extraction, zero-DB greetings, INR reconciliation, step logger, and architecture PDF documentation export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
