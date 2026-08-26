@@ -136,7 +136,6 @@ def test_batch_id_logging_and_propagation():
     assert data["batch_id"] == test_batch
     assert data["batchId"] == test_batch
     
-    # Check that audit log recorded the batch ID
     synth_resp = client.post(
         "/api/eva/synthesize",
         json={"intent": "balance_inquiry", "prompt": "check balance", "accountId": "ACC-94820", "batch_id": test_batch}
@@ -144,4 +143,21 @@ def test_batch_id_logging_and_propagation():
     assert synth_resp.status_code == 200
     synth_data = synth_resp.json()
     assert synth_data["batch_id"] == test_batch
+
+
+def test_account_statement_routes_to_agent_ro():
+    """Verify that statement requests strictly route to Specialist RO and subtasks have assignedAgentId 'agent_ro'."""
+    response = client.post(
+        "/api/orchestrator/dispatch",
+        json={"prompt": "Please generate a 30-day statement with transaction history for ACC-94820"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["intent"] == "account_statement"
+    assert data["assignedAgentName"] == "RO"
+    assert len(data["subtasks"]) >= 2
+    for st in data["subtasks"]:
+        assert st["assignedAgentId"] == "agent_ro"
+        assert "ro" in st["id"]
+
 

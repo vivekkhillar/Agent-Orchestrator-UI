@@ -374,7 +374,9 @@ export default function App() {
       }
 
       const identifiedIntent = orchData.intent || 'other';
-      const extractedAccountId = orchData.extractedAccountId || null;
+      const rawAccMatch = prompt.match(/\bACC[-_\s]?([A-Za-z0-9]+)\b/i) || prompt.match(/\b(?:account|a\/c|for|of|id)[:=\s#]+([A-Za-z0-9-_]+)\b/i);
+      const fallbackAcc = rawAccMatch ? (rawAccMatch[0].toUpperCase().startsWith('ACC') ? (rawAccMatch[0].toUpperCase().includes('-') ? rawAccMatch[0].toUpperCase() : `ACC-${rawAccMatch[0].toUpperCase().replace(/^ACC[-_\s]?/i, '')}`) : `ACC-${rawAccMatch[1].toUpperCase()}`) : null;
+      const extractedAccountId = orchData.extractedAccountId || fallbackAcc || null;
       const assignedAgentName = orchData.assignedAgentName || 'Boss EVA';
       const llmReasoning = orchData.llmReasoning || `Intent classified as ${identifiedIntent.toUpperCase()}`;
 
@@ -391,7 +393,7 @@ export default function App() {
         parentTaskId: `task_${Date.now()}`,
         title: st.title || `Subtask ${idx + 1}`,
         description: st.description || '',
-        assignedAgentId: st.assignedAgentId || 'agent_vk',
+        assignedAgentId: st.assignedAgentId || (identifiedIntent === 'account_statement' ? 'agent_ro' : (identifiedIntent === 'general_banking' && idx % 2 === 1 ? 'agent_ro' : 'agent_vk')),
         category: st.category || 'python',
         status: 'queued',
         progress: 0,
@@ -436,7 +438,8 @@ export default function App() {
       } else {
         for (let i = 0; i < newSubtasks.length; i++) {
           const subtask = newSubtasks[i];
-          const assignedAgent = agents.find(a => a.id === subtask.assignedAgentId) || agents[1];
+          const targetAgentId = subtask.assignedAgentId || (identifiedIntent === 'account_statement' ? 'agent_ro' : 'agent_vk');
+          const assignedAgent = agents.find(a => a.id === targetAgentId) || (identifiedIntent === 'account_statement' ? (agents.find(a => a.id === 'agent_ro') || agents[2]) : agents[1]);
 
           // --- SUBSTEP A: Boss calls subagent to the cabin ---
           setActiveStage(`STAGE ${i + 1}/${newSubtasks.length}: BRIEFING ${assignedAgent.name.toUpperCase()} IN CABIN`);

@@ -14,9 +14,9 @@ Analyze the customer natural language query and dynamically:
 2. Extract any requested time duration in days (e.g., "30 days", "last week" -> 7, "last 15 days" -> 15). If not specified, default to 30.
 3. Classify their intent dynamically based purely on the semantic meaning:
    - "greetings": Conversational greetings, hello, hi, hey, pleasantries, who are you. (Zero DB access).
-   - "balance_inquiry": Inquiring about current balance, available funds, checking, savings, holds in ₹.
-   - "account_statement": Inquiring about transaction history, statement, credits, debits in ₹.
-   - "general_banking": Inquiries needing both balance and statement.
+   - "balance_inquiry": Inquiring specifically about current balance, available funds, checking, savings, holds in ₹. (Assigned to Specialist VK).
+   - "account_statement": Inquiring specifically about transaction history, statement, passbook, credits, debits, cashflows in ₹. (Assigned to Specialist RO).
+   - "general_banking": ONLY for queries that explicitly request BOTH balance AND statement together. (Assigned to Specialists VK & RO).
    - "other": Ambiguous or non-banking questions.
 
 Return a pure JSON object matching this schema:

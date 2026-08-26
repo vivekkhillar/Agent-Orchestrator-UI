@@ -6,181 +6,264 @@ Production-grade Multi-Agent Banking Floor Orchestration System featuring:
 - **Specialist Agent RO (Desk 2)**: Dedicated PostgreSQL Account Statement & Ledger Specialist in ₹ (INR).
 - **Zero-DB Greeting Routing**: Boss EVA directly delivers warm executive greetings without querying PostgreSQL.
 - **Modular Prompts Architecture (`/prompts/`)**: Decoupled prompt engineering modules for intent classification, greetings, subagent execution, and customer response synthesis.
-- **Strict 2-Tier LLM Pipeline**: Primary: **Gemini (gemini-2.5-flash / gemini-3.7-flash)** ➔ Fallback: **Ollama (`phi3:mini`)** with full Raw Request & Raw Response capture.
-- **Dynamic PostgreSQL Ledger**: Zero hardcoded values; all balances and transactions are queried directly from the database in Indian Rupees (₹ / INR).
+- **Strict 2-Tier LLM Pipeline**: Primary: **Google Gemini (gemini-3.7-flash)** ➔ Fallback: **Local Ollama (`phi3:mini`)** with `robust_parse_json` auto-repair and complete request/response capture.
+- **Dynamic PostgreSQL Ledger**: Zero hardcoded values; all balances and transactions are queried directly from PostgreSQL in Indian Rupees (₹ / INR).
+- **End-to-End Batch Tracing**: Every inbound/outbound API request and LLM invocation is logged with `[BATCH: id]`, `[ACTOR]`, `[FUNCTION]`, `[PHASE]`, and `[STEP]`.
 
 ---
 
 ## 📁 System Architecture & Directory Structure
 
 ```
-├── prompts/                               # Centralized, Decoupled Prompt Modules
-│   ├── __init__.py                        # Python package exports
-│   ├── index.ts                           # TypeScript barrel exports
-│   ├── intent_classification.py / .ts     # Boss EVA intent routing prompt
-│   ├── greetings_response.py / .ts        # Boss EVA zero-DB greeting prompt
-│   ├── customer_response_synthesis.py / .ts# Final customer response synthesis prompt
-│   ├── agent_vk_balance.py / .ts          # Specialist VK Balance prompt
-│   └── agent_ro_statement.py / .ts        # Specialist RO Statement prompt
-├── banking_orchestrator.py                # LangGraph StateGraph Banking Engine
-├── fastapi_app.py                         # FastAPI REST Endpoints & Routers
-├── agent_vk_balance.py                    # VK Balance Service (PostgreSQL)
-├── agent_ro_statement.py                  # RO Statement Service (PostgreSQL)
-├── db_manager.ts                          # TypeScript PostgreSQL Client & Seeder
-├── init.sql                               # PostgreSQL Schema & Seed Data (INR ₹)
-├── docker-compose.yml                     # Docker Compose for PostgreSQL 16
-├── Dockerfile.postgres                    # Custom PostgreSQL Docker image
-├── server.ts                              # Express Gateway & Vite Middleware
-├── src/                                   # React Visual Office & Command Center UI
-└── .env.example                           # Environment configuration template
+multi-agent-office-harness/
+│
+├── 🧠 Python Multi-Agent Backend & LangGraph Pipeline
+│   ├── banking_orchestrator.py      # Core orchestrator: 2-stage LLM fallback, state machine, robust JSON parser, audit loggers
+│   ├── fastapi_app.py               # FastAPI Gateway (Port 8000): Endpoints for dispatch, subtasks, synthesis, telemetry
+│   ├── agent_vk_balance.py          # Balance Specialist Router & Ledger Service (query_account_balance)
+│   ├── agent_ro_statement.py       # Statement Specialist Router & Cashflow Service (generate_account_statement)
+│   ├── start_all.py                 # Multi-process launcher (FastAPI + Vite Dev Server)
+│   ├── start_fastapi.py             # Standalone FastAPI uvicorn runner (Port 8000)
+│   └── test_banking_api.py          # Complete pytest suite (11 test cases - 100% passing)
+│
+├── 📜 Specialized Dynamic Prompt Modules
+│   └── prompts/
+│       ├── __init__.py                      # Module exporter
+│       ├── intent_classification.py         # Boss EVA intent prompt (balance_inquiry vs account_statement vs general)
+│       ├── agent_vk_balance.py              # Specialist VK prompt for checking/savings/holds in ₹ INR
+│       ├── agent_ro_statement.py            # Specialist RO prompt for 30-day inflows/outflows/cashflow in ₹ INR
+│       ├── customer_response_synthesis.py   # Final customer synthesis prompt in ₹ INR
+│       └── greetings_response.py            # Zero-DB direct greetings response prompt
+│
+├── 💻 React 19 Frontend (Vite + TypeScript)
+│   ├── src/
+│   │   ├── App.tsx                  # Main Controller: Real-time loop, subtask dispatch, 15s telemetry polling
+│   │   ├── main.tsx                 # React DOM Root
+│   │   ├── types.ts                 # TypeScript type interfaces (Agent, SubTask, TaskAssignment, AuditLogEntry)
+│   │   ├── index.css                # Styling tokens and Tailwind/Vanilla CSS utilities
+│   │   ├── data/
+│   │   │   └── initialState.ts      # Agent initial states (Boss EVA 0x1, VK Table 1, RO Table 2)
+│   │   └── components/
+│   │       ├── OfficeCanvas.tsx     # 2D Canvas rendering agent avatars, cabins, server room, and walk paths
+│   │       ├── CommandCenter.tsx    # Live Chat terminal, Audit Logs viewer, Subtask status, LLM Telemetry
+│   │       ├── CodeSandbox.tsx      # Monaco/syntax code viewer displaying generated Python microservices
+│   │       ├── SubTaskGraph.tsx     # Directed acyclic graph (DAG) visualization of subtasks
+│   │       ├── AgentRoster.tsx      # Live agent list with status badges and current roles
+│   │       ├── AgentInspectorModal.tsx # Detailed modal for inspecting agent state and memory
+│   │       ├── AnalyticsView.tsx    # Operational metrics & response time analytics
+│   │       └── Header.tsx           # Global app header with status indicators & simulation speed control
+│
+├── 🗄️ PostgreSQL Database & Storage
+│   ├── init.sql                     # Schema & seed data (accounts, transactions, audit_logs, agent_activities)
+│   ├── docker-compose.db.yml        # PostgreSQL container config (Port 5432)
+│   └── Dockerfile.postgres          # Custom PostgreSQL Docker image
+│
+└── 📝 Structured File Logs
+    └── logs/
+        ├── banking_audit.log        # High-precision audit log with [BATCH: id] [ACTOR] [FUNCTION] [STEP] [LEVEL]
+        └── llm_invocations.log      # Raw LLM prompt & response JSON records with latency and token metrics
 ```
+
+---
+
+## 🔄 End-to-End System Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 Customer / User
+    participant UI as 💻 Frontend (React 19 / App.tsx)
+    participant Canvas as 🏢 2D Office Canvas (OfficeCanvas.tsx)
+    participant API as ⚡ FastAPI Backend (fastapi_app.py:8000)
+    participant Orchestrator as 🧠 Orchestrator (banking_orchestrator.py)
+    participant LLM as 🤖 2-Tier LLM (Gemini 3.7 / Ollama phi3)
+    participant DB as 🗄️ PostgreSQL DB (Port 5432)
+
+    %% ----------------------------------------------------
+    %% PHASE 1: SYSTEM DISCOVERY & INITIALIZATION
+    %% ----------------------------------------------------
+    rect rgb(240, 248, 255)
+    Note over UI,DB: [PHASE 1: SYSTEM INITIALIZATION & DISCOVERY]
+    UI->>API: 1. GET /api/health
+    API-->>UI: { status: "healthy", hasGeminiKey: true/false, currency: "INR (₹)" } ✅
+
+    UI->>API: 2. POST /api/ollama/status { endpoint: "http://localhost:11434" }
+    API-->>UI: { connected: true, model: "phi3:mini" } ✅
+
+    UI->>API: 3. GET /api/source_files
+    API-->>UI: { files: [8 dynamic Python prompt/service files] } ✅
+    end
+
+    %% ----------------------------------------------------
+    %% PHASE 2: DISPATCH, INTENT CLASSIFICATION & PLANNING
+    %% ----------------------------------------------------
+    rect rgb(254, 243, 199)
+    Note over User,DB: [PHASE 2: DISPATCH, INTENT CLASSIFICATION & PLANNING]
+    User->>UI: Customer Query: "Check available balance for ACC-94820" OR "Generate 30-day statement"
+    UI->>UI: Generate unified batch_id & extract target account via NLP regex
+    UI->>Canvas: Boss EVA enters 'analyzing' state in Executive Cabin [0x1]
+    
+    UI->>API: 4. POST /api/orchestrator/dispatch { prompt, account_id, batch_id }
+    API->>API: [LOG API_REQ] Inbound Request from UI with [BATCH: batch_id]
+    API->>Orchestrator: plan_orchestration(prompt, account_id, batch_id)
+    
+    Orchestrator->>LLM: Tier 1: Invokes Gemini 3.7 Flash with prompts/intent_classification.py
+    alt Gemini 3.7 Flash Responds (200 OK)
+        LLM-->>Orchestrator: Returns intent JSON { intent, extracted_account_id }
+    else Gemini Fails / Unreachable / Missing Key (Fallback Triggered)
+        Orchestrator->>Orchestrator: [LOG LLM_FALLBACK] Transition to Tier 2 Local LLM
+        Orchestrator->>LLM: Tier 2: Invokes Ollama (phi3:mini) at http://localhost:11434 (format: json, num_predict: 600)
+        LLM-->>Orchestrator: Returns raw JSON (auto-repaired via robust_parse_json)
+    end
+
+    alt Intent == "balance_inquiry"
+        Orchestrator->>Orchestrator: Route to Specialist VK -> Subtasks: [subtask_vk_1, subtask_vk_2] (assignedAgent: "VK")
+    else Intent == "account_statement"
+        Orchestrator->>Orchestrator: Route to Specialist RO -> Subtasks: [subtask_ro_1, subtask_ro_2] (assignedAgent: "RO")
+    else Intent == "general_banking"
+        Orchestrator->>Orchestrator: Route to Both Specialists -> Subtasks: [subtask_vk_gen, subtask_ro_gen] (assignedAgent: "VK & RO")
+    else Intent == "greetings"
+        Orchestrator->>Orchestrator: Direct Handling in Cabin (Zero DB Access) -> assignedAgent: "Boss EVA"
+    end
+
+    Orchestrator->>DB: INSERT INTO audit_logs (log_type: "intent_classification", [BATCH: batch_id])
+    API->>API: [LOG API_RESP] Responding to UI with Intent, Assigned Specialist, and Planned Subtasks
+    API-->>UI: Returns OrchestratedResponse { intent, assignedAgentName, extractedAccountId, subtasks: [...] } ✅
+    end
+
+    %% ----------------------------------------------------
+    %% PHASE 3: DATABASE-BACKED TOOL EXECUTION & FINAL SYNTHESIS
+    %% ----------------------------------------------------
+    rect rgb(240, 253, 244)
+    Note over UI,DB: [PHASE 3: SPECIALIST TOOL EXECUTION & RESPONSE SYNTHESIS]
+    
+    loop For Each Subtask in subtasks
+        UI->>Canvas: Boss EVA summons specialist (VK or RO) to Cabin [0x1]
+        Canvas->>Canvas: Specialist walks to Server Room (710, 120) & connects to DB
+
+        UI->>API: 5. POST /api/agent/execute_subtask { subtask, agent, prompt, accountId, batch_id }
+        API->>API: [LOG API_REQ] Inbound Subtask Request with [BATCH: batch_id]
+        API->>Orchestrator: execute_agent_subtask(...)
+
+        alt Agent == "agent_vk" (Balance Specialist)
+            Orchestrator->>DB: SELECT checking_balance, savings_balance, pending_holds, available_balance FROM accounts WHERE account_id = 'ACC-94820'
+            DB-->>Orchestrator: Available: ₹1,39,430.50 | Checking: ₹98,450.50 | Savings: ₹44,400.00 | Holds: ₹3,420.00
+            Orchestrator->>LLM: Injects live balance data into prompts/agent_vk_balance.py
+        else Agent == "agent_ro" (Statement Specialist)
+            Orchestrator->>DB: SELECT * FROM transactions WHERE account_id = 'ACC-94820' ORDER BY date DESC
+            DB-->>Orchestrator: Inflows: +₹64,200.00 | Outflows: -₹18,420.00 (5 transactions)
+            Orchestrator->>LLM: Injects live transaction rows into prompts/agent_ro_statement.py
+        end
+
+        LLM-->>Orchestrator: Returns { speechSummary, thoughtLog, code: { filename, content }, executionOutput }
+        Orchestrator->>DB: INSERT INTO audit_logs & agent_activities (activity: SUBTASK_EXECUTION, [BATCH: batch_id])
+        API->>API: [LOG API_RESP] Responding to UI with Subtask Result
+        API-->>UI: Returns Subtask Execution Payload ✅
+
+        UI->>UI: Streams thoughts, SQL logs, and microservice Python code into Terminal
+        Canvas->>Canvas: Specialist returns to Assigned Workstation Desk
+    end
+
+    Note over UI,LLM: [FINAL EXECUTIVE CUSTOMER SYNTHESIS]
+    UI->>API: 6. POST /api/eva/synthesize { intent, prompt, accountId, subtaskResults, batch_id }
+    API->>API: [LOG API_REQ] Inbound Synthesis Request with [BATCH: batch_id]
+    API->>Orchestrator: synthesize_customer_response(...)
+    Orchestrator->>LLM: Invokes prompts/customer_response_synthesis.py with PostgreSQL verified figures in ₹ (INR)
+    LLM-->>Orchestrator: Returns executive customer response in Indian Rupees (₹ / INR)
+    Orchestrator->>DB: INSERT INTO audit_logs (log_type: "customer_synthesis", [BATCH: batch_id])
+    API->>API: [LOG API_RESP] Responding to UI with Customer Response
+    API-->>UI: Returns { customer_response: "Dear Customer, Account ACC-94820 holds ₹1,39,430.50...", usedEngine } ✅
+    UI->>Canvas: Boss EVA displays final speech bubble in Cabin [0x1]
+    UI->>User: Displays finalized Indian Rupees (₹) report in Command Center
+    end
+
+    %% ----------------------------------------------------
+    %% PHASE 4: AUDIT, TELEMETRY & 15-SECOND POLLING
+    %% ----------------------------------------------------
+    rect rgb(248, 250, 252)
+    Note over UI,DB: [PHASE 4: REAL-TIME AUDIT & TELEMETRY POLLING (EVERY 15 SECONDS)]
+    loop Background Telemetry Refresh (Every 15s)
+        UI->>API: 7. GET /api/logs/audit?limit=250
+        API->>API: Reads latest lines from logs/banking_audit.log
+        API-->>UI: { logs: [ ...structured [BATCH: id] [ACTOR] [FUNCTION] [STEP] [LEVEL] entries... ] } ✅
+
+        UI->>API: 8. GET /api/logs/llm?limit=100
+        API->>API: Reads JSON records from logs/llm_invocations.log
+        API-->>UI: { logs: [ ...raw prompts, raw responses, latencies, tokens... ] } ✅
+
+        UI->>API: 9. GET /api/agent/activities?limit=50
+        API->>DB: SELECT * FROM agent_activities ORDER BY timestamp DESC LIMIT 50
+        DB-->>API: Returns persisted agent actions
+        API-->>UI: { activities: [ ...persisted agent actions... ] } ✅
+    end
+    end
+```
+
+---
+
+## 📌 API Route & Component Mapping Matrix
+
+| Phase | Endpoint / Trigger | Executing Backend Function | Prompt / DB Asset | Executing Agent | UI Component Updated |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Phase 1** | `GET /api/health` | `handle_health()` | System status check | System | `Header.tsx` status indicator |
+| **Phase 1** | `POST /api/ollama/status` | `handle_ollama_status()` | Ollama probe (`11434`) | System | `CommandCenter.tsx` telemetry |
+| **Phase 1** | `GET /api/source_files` | `handle_get_source_files()` | `prompts/*.py`, `agent_*.py` | System | `CodeSandbox.tsx` dropdown |
+| **Phase 2** | `POST /api/orchestrator/dispatch` | `plan_orchestration()` | `prompts/intent_classification.py` | **Boss EVA [0x1]** | `SubTaskGraph.tsx` & `CommandCenter.tsx` |
+| **Phase 3** | `POST /api/agent/execute_subtask` | `execute_agent_subtask()` | `prompts/agent_vk_balance.py` / `accounts` | **Specialist VK** | `OfficeCanvas.tsx` & `CodeSandbox.tsx` |
+| **Phase 3** | `POST /api/agent/execute_subtask` | `execute_agent_subtask()` | `prompts/agent_ro_statement.py` / `transactions` | **Specialist RO** | `OfficeCanvas.tsx` & `CodeSandbox.tsx` |
+| **Phase 3** | `POST /api/eva/synthesize` | `synthesize_customer_response()` | `prompts/customer_response_synthesis.py` | **Boss EVA [0x1]** | `CommandCenter.tsx` Chat bubble |
+| **Phase 4** | `GET /api/logs/audit?limit=250` | `handle_get_audit_logs()` | `logs/banking_audit.log` | API Gateway | `CommandCenter.tsx` Audit Viewer |
+| **Phase 4** | `GET /api/logs/llm?limit=100` | `handle_get_llm_logs()` | `logs/llm_invocations.log` | API Gateway | `CommandCenter.tsx` LLM Telemetry |
+| **Phase 4** | `GET /api/agent/activities` | `handle_get_agent_activities()` | `agent_activities` table | API Gateway | `AgentRoster.tsx` / `AnalyticsView.tsx` |
 
 ---
 
 ## 🚀 Step-by-Step Running Guide
 
-### Step 1: Start the PostgreSQL Database (Docker)
+### Step 1: Start PostgreSQL Database (Docker)
 
-You can launch PostgreSQL using either Docker Compose or direct Docker run.
-
-#### Option A: Using Docker Compose (Recommended)
 ```bash
-# Start PostgreSQL in background
-docker compose up -d postgres
-
-# Check container health and status
-docker compose ps
+docker compose -f docker-compose.db.yml up -d
 ```
-
-#### Option B: Using Direct Docker Run
-```bash
-docker run -d \
-  --name banking_postgres \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgrespassword \
-  -e POSTGRES_DB=banking_db \
-  -p 5432:5432 \
-  -v $(pwd)/init.sql:/docker-entrypoint-initdb.d/init.sql \
-  postgres:16-alpine
-```
-
----
 
 ### Step 2: Configure Environment Variables
 
-Create `.env` based on `.env.example`:
-
-```bash
-cp .env.example .env
-```
-
 Ensure your `.env` contains:
 ```env
-# PostgreSQL Connection URL (Matches Docker Service)
 DATABASE_URL=postgresql://postgres:postgrespassword@localhost:5432/banking_db
-
-# Gemini API Key (Primary LLM Engine)
 GEMINI_API_KEY=your_gemini_api_key_here
-
-# Local Ollama Fallback Engine (Runs phi3:mini)
-OLLAMA_ENDPOINT=http://localhost:11434/api/generate
+OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=phi3:mini
+OLLAMA_TIMEOUT=180.0
 ```
 
----
+### Step 3: Start the Complete System (One Command)
 
-### Step 3: (Optional) Start Local Ollama Fallback
-
-For local offline resilience if Gemini reaches rate limits or is disconnected:
+Launch both the FastAPI backend (Port 8000) and the Vite frontend (Port 3000) simultaneously:
 
 ```bash
-# Install and run Ollama, then pull the phi3:mini model:
-ollama run phi3:mini
+python start_all.py
 ```
+
+* **Frontend UI**: `http://localhost:3000`
+* **FastAPI Docs**: `http://localhost:8000/docs`
 
 ---
 
-### Step 4: Run the Python FastAPI & LangGraph Orchestrator
+## 🧪 Testing & Verification
 
-Install Python dependencies and start the FastAPI service:
-
+Run the comprehensive pytest suite:
 ```bash
-# Install dependencies
-pip install fastapi uvicorn pydantic psycopg2-binary google-genai langgraph requests
-
-# Run FastAPI backend on port 8000
-python fastapi_app.py
-# or: uvicorn fastapi_app:app --host 0.0.0.0 --port 8000 --reload
+pytest test_banking_api.py -v
 ```
 
-FastAPI Interactive Docs will be accessible at: `http://localhost:8000/docs`
-
----
-
-### Step 5: Run the Unified Web Application & Visual Office Gateway
-
-Install Node.js dependencies and start the dev server:
-
+Run TypeScript compilation check:
 ```bash
-# Install dependencies
-npm install
-
-# Start Express + Vite visual simulation on port 3000
-npm run dev
-```
-
-Open your browser at: `http://localhost:3000`
-
----
-
-## 🔍 How the Prompts & Routing Work
-
-1. **User enters query**: e.g., *"Hi, good morning!"* or *"What is my available balance?"*
-2. **Intent Classification (`/prompts/intent_classification.py`)**:
-   - Boss EVA dynamically classifies the intent using Gemini / Ollama fallback.
-3. **Branch 1 - Greetings**:
-   - Intent is `greetings` ➔ Bypasses database entirely (0 SQL queries).
-   - Boss EVA responds directly with `/prompts/greetings_response.py`.
-4. **Branch 2 - Balance Inquiry**:
-   - Intent is `balance_inquiry` ➔ Dispatched to Specialist VK.
-   - VK queries PostgreSQL `accounts` table dynamically for `ACC-94820`.
-   - Returns available, checking, savings balance & pending holds in ₹.
-5. **Branch 3 - Account Statement**:
-   - Intent is `account_statement` ➔ Dispatched to Specialist RO.
-   - RO queries PostgreSQL `transactions` table dynamically for `ACC-94820`.
-   - Aggregates total credits, total debits, and net cashflow in ₹.
-6. **Customer Response Synthesis (`/prompts/customer_response_synthesis.py`)**:
-   - Boss EVA synthesizes the verified results into an executive customer-facing message in Indian Rupees (₹ / INR).
-
-
-
-
-```mermaid
-graph TD
-    User["👤 User (Browser UI)"] -->|Types Prompt & Clicks Send| ReactApp["📱 React Frontend (src/App.tsx)"]
-    
-    subgraph "Frontend Layer (Vite + React)"
-        ReactApp -->|safeJsonPost| ApiCalls["/api/orchestrator/dispatch<br/>/api/agent/execute_subtask<br/>/api/eva/synthesize"]
-    end
-
-    subgraph "Node.js & Express Gateway (server.ts : 3000)"
-        ApiCalls --> ExpressServer["Node.js Express Server (server.ts)"]
-        ExpressServer --> ViteDev["Vite Dev Server (HMR & Asset Bundling)"]
-        ExpressServer --> LLMTwoTier["2-Tier LLM Pipeline (Gemini 3.7 -> Ollama)"]
-        ExpressServer --> PostgresNode["PostgreSQL (db_manager.ts)"]
-    end
-
-    subgraph "Python FastAPI Microservice (fastapi_app.py : 8000)"
-        FastApiApp["FastAPI Gateway (fastapi_app.py)"]
-        FastApiApp --> AgentVK["Agent VK: Balance Router (agent_vk_balance.py)"]
-        FastApiApp --> AgentRO["Agent RO: Statement Router (agent_ro_statement.py)"]
-        FastApiApp --> LangGraphOrch["LangGraph Orchestrator (banking_orchestrator.py)"]
-        LangGraphOrch --> PostgresPy["PostgreSQL (psycopg2)"]
-    end
+npm run lint
 ```
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details. All third-party dependencies are commercially friendly and permissively licensed (MIT, Apache-2.0, BSD-3-Clause, ISC).
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.

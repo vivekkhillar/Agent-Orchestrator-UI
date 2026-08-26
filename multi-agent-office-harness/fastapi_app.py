@@ -41,6 +41,7 @@ from banking_orchestrator import (
     log_agent_activity_to_postgres,
     read_audit_log_file,
     read_llm_evaluation_log_file,
+    write_to_file_log,
     AUDIT_LOG_FILE,
     LLM_LOG_FILE,
     OLLAMA_BASE_URL,
@@ -221,8 +222,24 @@ async def dispatch_customer_query(req: CustomerQueryRequest):
     if not req.prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
 
-    target_acc = req.account_id or req.accountId or None
+    target_acc = req.account_id or req.accountId or extract_account_id_from_text(req.prompt) or None
     bid = req.batch_id or req.batchId or None
+
+    # 1. Log Inbound API Request from UI
+    write_to_file_log({
+        "source": "API_Gateway_[Inbound]",
+        "level": "API_REQ",
+        "stepNumber": "API-1",
+        "stepName": "POST /api/orchestrator/dispatch",
+        "status": "RECEIVED",
+        "message": f"Inbound Request from UI: Prompt=\"{req.prompt}\" (Account ID: {target_acc or 'None provided'}).",
+        "details": {
+            "endpoint": "/api/orchestrator/dispatch",
+            "prompt": req.prompt,
+            "accountId": target_acc,
+            "batch_id": bid
+        }
+    }, batch_id=bid)
 
     plan = plan_orchestration(
         prompt=req.prompt,
@@ -233,7 +250,7 @@ async def dispatch_customer_query(req: CustomerQueryRequest):
         batch_id=bid
     )
 
-    return OrchestratedResponse(
+    response_payload = OrchestratedResponse(
         success=True,
         status="SUCCESS",
         batch_id=plan.get("batch_id"),
@@ -258,6 +275,27 @@ async def dispatch_customer_query(req: CustomerQueryRequest):
         timestamp=get_ist_timestamp()
     )
 
+    # 2. Log Outbound API Response to UI
+    write_to_file_log({
+        "source": "API_Gateway_[Outbound]",
+        "level": "API_RESP",
+        "stepNumber": "API-1",
+        "stepName": "POST /api/orchestrator/dispatch",
+        "status": "RESPONDED",
+        "message": f"Outbound Response to UI: Intent=[{plan['intent'].upper()}] -> Assigned to [{plan['assignedAgentName']}] with {len(plan.get('subtasks', []))} subtasks planned.",
+        "details": {
+            "endpoint": "/api/orchestrator/dispatch",
+            "status": "200 OK",
+            "intent": plan["intent"],
+            "assignedAgent": plan["assignedAgentName"],
+            "extractedAccountId": plan.get("extractedAccountId"),
+            "subtasksCount": len(plan.get("subtasks", [])),
+            "usedEngine": plan["usedEngine"]
+        }
+    }, batch_id=bid)
+
+    return response_payload
+
 
 # ====================================================================
 # SUBTASK EXECUTION & SYNTHESIS ENDPOINTS
@@ -269,8 +307,33 @@ async def handle_agent_execute_subtask(req: SubtaskExecuteRequest):
     Specialist Agent Subtask Execution endpoint.
     Retrieves live PostgreSQL records and synthesizes code & thoughts.
     """
-    target_acc = req.accountId or req.account_id or None
+    target_acc = (
+        req.accountId or 
+        req.account_id or 
+        extract_account_id_from_text(req.prompt) or 
+        extract_account_id_from_text(req.subtask.get("description", "")) or 
+        None
+    )
     bid = req.batch_id or req.batchId or None
+
+    # 1. Log Inbound Subtask Request from UI
+    write_to_file_log({
+        "source": "API_Gateway_[Inbound]",
+        "level": "API_REQ",
+        "stepNumber": f"API-SUB-{req.subtask.get('id', '1')}",
+        "stepName": "POST /api/agent/execute_subtask",
+        "status": "RECEIVED",
+        "message": f"Inbound Subtask Request from UI: [{req.subtask.get('title')}] for Specialist Agent [{req.agent.get('name')}] (Account: {target_acc or 'None'}).",
+        "details": {
+            "endpoint": "/api/agent/execute_subtask",
+            "subtaskId": req.subtask.get("id"),
+            "subtaskTitle": req.subtask.get("title"),
+            "agentName": req.agent.get("name"),
+            "accountId": target_acc,
+            "batch_id": bid
+        }
+    }, batch_id=bid)
+
     result = execute_agent_subtask(
         subtask=req.subtask,
         agent=req.agent,
@@ -281,6 +344,24 @@ async def handle_agent_execute_subtask(req: SubtaskExecuteRequest):
         ollama_model=req.ollamaModel,
         batch_id=bid
     )
+
+    # 2. Log Outbound Subtask Response to UI
+    write_to_file_log({
+        "source": "API_Gateway_[Outbound]",
+        "level": "API_RESP",
+        "stepNumber": f"API-SUB-{req.subtask.get('id', '1')}",
+        "stepName": "POST /api/agent/execute_subtask",
+        "status": "RESPONDED",
+        "message": f"Outbound Subtask Response to UI: Specialist [{req.agent.get('name')}] produced summary \"{result.get('speechSummary', '')[:60]}...\" ({len(result.get('thoughtLog', []))} thoughts).",
+        "details": {
+            "endpoint": "/api/agent/execute_subtask",
+            "status": "200 OK",
+            "speechSummary": result.get("speechSummary"),
+            "thoughtsCount": len(result.get("thoughtLog", [])),
+            "codeFilename": result.get("code", {}).get("filename") if result.get("code") else None
+        }
+    }, batch_id=bid)
+
     return result
 
 
@@ -290,8 +371,31 @@ async def handle_eva_synthesize(req: SynthesisRequest):
     Boss EVA Final Customer Synthesis endpoint.
     Zero DB calls for greetings, live PostgreSQL reconciliation for banking inquiries.
     """
-    target_acc = req.accountId or req.account_id or None
+    target_acc = (
+        req.accountId or 
+        req.account_id or 
+        extract_account_id_from_text(req.prompt) or 
+        None
+    )
     bid = req.batch_id or req.batchId or None
+
+    # 1. Log Inbound Synthesis Request from UI
+    write_to_file_log({
+        "source": "API_Gateway_[Inbound]",
+        "level": "API_REQ",
+        "stepNumber": "API-SYNTH",
+        "stepName": "POST /api/eva/synthesize",
+        "status": "RECEIVED",
+        "message": f"Inbound Final Synthesis Request from UI: Intent=[{req.intent.upper()}] (Account: {target_acc or 'None'}, Subtask Results: {len(req.subtaskResults or [])}).",
+        "details": {
+            "endpoint": "/api/eva/synthesize",
+            "intent": req.intent,
+            "accountId": target_acc,
+            "subtaskResultsCount": len(req.subtaskResults or []),
+            "batch_id": bid
+        }
+    }, batch_id=bid)
+
     try:
         result = synthesize_customer_response(
             intent=req.intent,
@@ -302,11 +406,27 @@ async def handle_eva_synthesize(req: SynthesisRequest):
             ollama_model=req.ollamaModel,
             batch_id=bid
         )
+
+        # 2. Log Outbound Synthesis Response to UI
+        write_to_file_log({
+            "source": "API_Gateway_[Outbound]",
+            "level": "API_RESP",
+            "stepNumber": "API-SYNTH",
+            "stepName": "POST /api/eva/synthesize",
+            "status": "RESPONDED",
+            "message": f"Outbound Final Synthesis Response to UI: Boss EVA synthesized customer response: \"{result.get('customer_response', '')[:70]}...\".",
+            "details": {
+                "endpoint": "/api/eva/synthesize",
+                "status": "200 OK",
+                "databaseAccessed": result.get("database_accessed"),
+                "usedEngine": result.get("usedEngine")
+            }
+        }, batch_id=bid)
+
         return result
     except Exception as e:
         logger.error(f"Error in handle_eva_synthesize: {e}")
-        # Safe fallback guaranteed to return valid customer response in INR (₹)
-        return {
+        fallback_resp = {
             "success": True,
             "batch_id": bid,
             "batchId": bid,
@@ -318,6 +438,18 @@ async def handle_eva_synthesize(req: SynthesisRequest):
             "fallbackTriggered": True,
             "timestamp": get_ist_timestamp()
         }
+
+        write_to_file_log({
+            "source": "API_Gateway_[Outbound]",
+            "level": "API_RESP",
+            "stepNumber": "API-SYNTH",
+            "stepName": "POST /api/eva/synthesize",
+            "status": "RESPONDED",
+            "message": f"Outbound Final Synthesis Fallback Response to UI for {target_acc or 'account'}.",
+            "details": { "endpoint": "/api/eva/synthesize", "status": "200 OK (Fallback)", "error": str(e) }
+        }, batch_id=bid)
+
+        return fallback_resp
 
 
 # ====================================================================

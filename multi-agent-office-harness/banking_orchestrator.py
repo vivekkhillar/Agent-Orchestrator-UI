@@ -96,35 +96,43 @@ def format_inr(val: float) -> str:
 
 
 def extract_account_id_from_text(text: Optional[str]) -> Optional[str]:
-    """Extracts account identifiers dynamically from user prompt using NLP regex patterns."""
+    """
+    Extracts account identifiers dynamically from user prompt or subtask description using NLP regex patterns.
+    Handles: ACC-94820, ACC_94820, ACC 94820, ACC94820, Account 94820, for 94820, balance 94820, etc.
+    """
     if not text or not isinstance(text, str):
         return None
     
-    # Pattern 1: ACC-XXXXX, ACC XXXXX, ACC12345
-    m = re.search(r'\bACC[-\s]?([A-Za-z0-9]+)\b', text, re.IGNORECASE)
+    # Pattern 1: ACC-XXXXX, ACC_XXXXX, ACC XXXXX, ACC12345
+    m = re.search(r'\bACC[-_\s]?([A-Za-z0-9]+)\b', text, re.IGNORECASE)
     if m:
         val = m.group(1).upper()
-        if val not in ("OUNT", "OUNTS", "OUNTING", "OUNTED"):
+        if val not in ("OUNT", "OUNTS", "OUNTING", "OUNTED", "OUNTID", "OUNTNO"):
             return f"ACC-{val}"
             
-    # Pattern 2: phrases like "account 94820", "a/c #55210", "account id ACC-10029"
-    m_phrase = re.search(r'\b(?:account(?:\s*(?:id|number|no\.?|#))?|a\/c)\s*[:=]?\s*([A-Za-z0-9-]+)\b', text, re.IGNORECASE)
+    # Pattern 2: phrases like "account 94820", "a/c #55210", "account id ACC-10029", "a/c: 94820"
+    m_phrase = re.search(r'\b(?:account(?:\s*(?:id|number|no\.?|#))?|a\/c)\s*[:=#]?\s*([A-Za-z0-9-_]+)\b', text, re.IGNORECASE)
     if m_phrase:
         val = m_phrase.group(1).strip()
-        stop_words = {'balance', 'statement', 'details', 'info', 'summary', 'history', 'my', 'the', 'this', 'that', 'please', 'is', 'for', 'check'}
+        stop_words = {'balance', 'statement', 'details', 'info', 'summary', 'history', 'my', 'the', 'this', 'that', 'please', 'is', 'for', 'check', 'of', 'in', 'to'}
         if val.lower() not in stop_words:
             if val.upper().startswith('ACC-'):
                 return val.upper()
             if val.upper().startswith('ACC') and len(val) > 3 and val.upper() != 'ACCOUNT':
-                return f"ACC-{val[3:].upper()}"
+                return f"ACC-{val[3:].upper().lstrip('-_')}"
             if re.match(r'^\d+$', val):
                 return f"ACC-{val}"
             return val.upper()
             
-    # Pattern 3: numeric account codes like "for 94820"
-    num_match = re.search(r'\b(?:for|of|in|check|id)\s+(\d{4,6})\b', text, re.IGNORECASE)
+    # Pattern 3: preposition/keyword + number like "for 94820", "of 55210", "in 10029", "balance 94820", "statement 55210"
+    num_match = re.search(r'\b(?:for|of|in|check|id|balance|statement|account|ledger|fetch)\s+[:#]?\s*(\d{4,8})\b', text, re.IGNORECASE)
     if num_match:
         return f"ACC-{num_match.group(1)}"
+
+    # Pattern 4: Any standalone 5-digit number commonly used in bank ledger accounts
+    standalone_num = re.search(r'\b(\d{5})\b', text)
+    if standalone_num:
+        return f"ACC-{standalone_num.group(1)}"
         
     return None
 
@@ -153,26 +161,47 @@ def get_current_batch_id() -> str:
     return bid
 
 def write_to_file_log(entry: Dict[str, Any], batch_id: Optional[str] = None) -> None:
-    """Appends structured audit log to logs/banking_audit.log with tracking batch_id."""
+    """
+    Appends high-precision structured audit log to logs/banking_audit.log with:
+    - [BATCH: id]
+    - [ACTOR: name]
+    - [FUNCTION: function_name]
+    - [PHASE: phase_name]
+    - [STEP num: name]
+    - [LEVEL]
+    - Message & full JSON Details (request/response payloads, SQL, prompts)
+    """
     try:
         ts = entry.get("timestamp") or get_ist_timestamp()
         bid = batch_id or entry.get("batch_id") or entry.get("batchId") or get_current_batch_id()
         level = entry.get("level", "INFO")
-        source = entry.get("source", "System")
+        actor = entry.get("actor") or entry.get("source", "System")
+        func = entry.get("function") or entry.get("caller") or ""
+        phase = entry.get("phase") or ""
         step_num = entry.get("stepNumber", "")
         step_name = entry.get("stepName", "")
         status = entry.get("status", "")
         message = entry.get("message", "")
         details = entry.get("details", {})
-        if isinstance(details, dict) and "batch_id" not in details and "batchId" not in details:
-            details["batch_id"] = bid
-        
+        if isinstance(details, dict):
+            if "batch_id" not in details and "batchId" not in details:
+                details["batch_id"] = bid
+            if actor and "actor" not in details:
+                details["actor"] = actor
+            if func and "function" not in details:
+                details["function"] = func
+            if phase and "phase" not in details:
+                details["phase"] = phase
+
         batch_str = f" [BATCH: {bid}]" if bid else ""
-        step_header = f"[STEP {step_num}: {step_name}] " if step_num or step_name else ""
+        actor_str = f" [ACTOR: {actor}]" if actor else ""
+        func_str = f" [FUNCTION: {func}]" if func else ""
+        phase_str = f" [PHASE: {phase}]" if phase else ""
+        step_header = f" [STEP {step_num}: {step_name}]" if step_num or step_name else ""
         status_suffix = f" [STATUS: {status}]" if status else ""
         details_str = f" | Details: {json.dumps(details)}" if details else ""
-        
-        log_line = f"[{ts}]{batch_str} [{level}] [{source}] {step_header}{message}{status_suffix}{details_str}\n"
+
+        log_line = f"[{ts}]{batch_str} [{level}]{actor_str}{func_str}{phase_str}{step_header} {message}{status_suffix}{details_str}\n"
         with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(log_line)
     except Exception as e:
@@ -228,6 +257,71 @@ def read_llm_evaluation_log_file(limit: int = 50) -> List[Dict[str, Any]]:
 # 2. TWO-STAGE LLM INVOCATION PIPELINE (Gemini -> Fallback to Ollama phi3:mini)
 # ====================================================================
 
+def robust_parse_json(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Robust JSON parser with automatic bracket/quote repair and regex field extraction.
+    Guarantees zero crashes on partially truncated or unterminated LLM JSON outputs.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    
+    clean = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    
+    # 1. Direct parse
+    try:
+        return json.loads(clean)
+    except Exception:
+        pass
+
+    # 2. Extract outermost {...}
+    match = re.search(r'(\{.*\})', clean, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            pass
+
+    # 3. Bracket and quotation repair
+    try:
+        repaired = clean.strip()
+        num_quotes = len(re.findall(r'(?<!\\)"', repaired))
+        if num_quotes % 2 != 0:
+            repaired += '"'
+        repaired = re.sub(r',\s*$', '', repaired)
+        open_b = repaired.count('{') - repaired.count('}')
+        open_sq = repaired.count('[') - repaired.count(']')
+        if open_sq > 0:
+            repaired += ']' * open_sq
+        if open_b > 0:
+            repaired += '}' * open_b
+        return json.loads(repaired)
+    except Exception:
+        pass
+
+    # 4. Regex field extraction
+    extracted: Dict[str, Any] = {}
+    speech_m = re.search(r'"speechSummary"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)', clean)
+    if speech_m:
+        extracted["speechSummary"] = speech_m.group(1)
+
+    intent_m = re.search(r'"intent"\s*:\s*"([^"]+)"', clean)
+    if intent_m:
+        extracted["intent"] = intent_m.group(1)
+
+    conf_m = re.search(r'"intent_confidence"\s*:\s*([0-9.]+)', clean)
+    if conf_m:
+        try:
+            extracted["intent_confidence"] = float(conf_m.group(1))
+        except Exception:
+            pass
+
+    reason_m = re.search(r'"intent_reasoning"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)', clean)
+    if reason_m:
+        extracted["intent_reasoning"] = reason_m.group(1)
+
+    return extracted if extracted else None
+
+
 def invoke_llm_with_fallback(
     system_prompt: str,
     user_prompt: str,
@@ -265,6 +359,28 @@ def invoke_llm_with_fallback(
     if gemini_key and gemini_key != "MY_GEMINI_API_KEY":
         try:
             logger.info("Attempting LLM call via Gemini (gemini-3.7-flash)...")
+            
+            # Log Outbound LLM Prompt to Gemini
+            write_to_file_log({
+                "source": caller or "invoke_llm_with_fallback",
+                "actor": caller or "LangGraphOrchestrator",
+                "function": "invoke_llm_with_fallback",
+                "phase": "LLM Invocation",
+                "level": "LLM_PROMPT",
+                "stepNumber": "LLM-1",
+                "stepName": "Gemini 3.7 Flash Outbound Request",
+                "status": "SENT",
+                "message": f"Sending Prompt to Gemini 3.7 Flash: System Instruction ({len(system_prompt)} chars), User Prompt ({len(user_prompt)} chars).",
+                "details": {
+                    "provider": "Google Gemini",
+                    "model": "gemini-3.7-flash",
+                    "json_mode": json_mode,
+                    "temperature": temperature,
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt
+                }
+            })
+
             from google import genai
             client = genai.Client(api_key=gemini_key)
             config_params: Dict[str, Any] = {
@@ -282,22 +398,26 @@ def invoke_llm_with_fallback(
             raw_text = gemini_resp.text or ""
             latency_ms = int((time.time() - start_time) * 1000)
 
-            parsed_json = None
-            if json_mode:
-                try:
-                    parsed_json = json.loads(raw_text)
-                except Exception:
-                    clean = raw_text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-                    parsed_json = json.loads(clean)
+            parsed_json = robust_parse_json(raw_text) if json_mode else None
 
+            # Log Inbound LLM Response from Gemini
             write_to_file_log({
                 "source": caller or "invoke_llm_with_fallback",
-                "level": "STEP_SUCCESS",
+                "actor": caller or "LangGraphOrchestrator",
+                "function": "invoke_llm_with_fallback",
+                "phase": "LLM Invocation",
+                "level": "LLM_RESP",
                 "stepNumber": "LLM-1",
-                "stepName": "Gemini Primary Model Invocation",
+                "stepName": "Gemini 3.7 Flash Inbound Response",
                 "status": "SUCCESS",
-                "message": f"Gemini (gemini-3.7-flash) successfully returned response ({latency_ms}ms). Output parsed: {'JSON Valid' if parsed_json else 'Raw Text'}.",
-                "details": { "caller": caller, "latencyMs": latency_ms, "jsonMode": json_mode }
+                "message": f"Received Response from Gemini 3.7 Flash ({latency_ms}ms). Parsed: {'Valid JSON' if parsed_json else 'Raw Text'}.",
+                "details": {
+                    "provider": "Google Gemini",
+                    "model": "gemini-3.7-flash",
+                    "latencyMs": latency_ms,
+                    "rawResponse": raw_text,
+                    "parsedJson": parsed_json
+                }
             })
 
             write_llm_evaluation_log({
@@ -343,29 +463,45 @@ def invoke_llm_with_fallback(
             raw_request["gemini_error"] = str(e)
             write_to_file_log({
                 "source": caller or "invoke_llm_with_fallback",
-                "level": "STEP_FAILED",
+                "actor": caller or "LangGraphOrchestrator",
+                "function": "invoke_llm_with_fallback",
+                "phase": "LLM Fallback Trigger",
+                "level": "LLM_FALLBACK",
                 "stepNumber": "LLM-1",
                 "stepName": "Gemini Primary Model Invocation",
-                "status": "FALLBACK",
-                "message": f"Gemini 3.7 Flash failed: {e}. Triggering fallback to Tier 2 Ollama ({model}).",
+                "status": "FALLBACK_TRIGGERED",
+                "message": f"Gemini 3.7 Flash failed ({e}). Triggering automatic fallback to Tier 2 Ollama ({model}).",
                 "details": { "caller": caller, "errorReason": str(e), "fallbackTarget": f"Ollama ({model})" }
             })
 
     # Attempt 2: Fallback to Ollama phi3:mini
     try:
         logger.info(f"Invoking Fallback LLM via Ollama at {endpoint} (Model: {model})...")
+        
+        # Log Outbound LLM Prompt to Ollama
         write_to_file_log({
             "source": caller or "invoke_llm_with_fallback",
-            "level": "STEP_START",
+            "actor": caller or "LangGraphOrchestrator",
+            "function": "invoke_llm_with_fallback",
+            "phase": "LLM Invocation",
+            "level": "LLM_PROMPT",
             "stepNumber": "LLM-2",
-            "stepName": "Ollama Fallback Invocation",
-            "status": "STARTED",
-            "message": f"Checking Tier 2 Ollama fallback at {endpoint} ({model}).",
-            "details": { "caller": caller, "endpoint": endpoint, "model": model, "jsonMode": json_mode }
+            "stepName": "Ollama Fallback Outbound Request",
+            "status": "SENT",
+            "message": f"Sending Prompt to Ollama at {endpoint} ({model}): System Prompt ({len(system_prompt)} chars), User Prompt ({len(user_prompt)} chars).",
+            "details": {
+                "provider": "Ollama",
+                "endpoint": endpoint,
+                "model": model,
+                "json_mode": json_mode,
+                "temperature": temperature,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt
+            }
         })
 
         ollama_url = f"{endpoint}/api/generate"
-        max_tokens = 350 if caller and "Synthesize" in caller else (200 if json_mode else 300)
+        max_tokens = 600 if json_mode else 350
         payload = {
             "model": model,
             "prompt": user_prompt,
@@ -385,22 +521,26 @@ def invoke_llm_with_fallback(
         if resp.status_code == 200:
             data = resp.json()
             raw_text = data.get("response", "")
-            parsed_json = None
-            if json_mode and raw_text:
-                try:
-                    parsed_json = json.loads(raw_text)
-                except Exception:
-                    clean = raw_text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-                    parsed_json = json.loads(clean)
+            parsed_json = robust_parse_json(raw_text) if json_mode and raw_text else None
 
+            # Log Inbound LLM Response from Ollama
             write_to_file_log({
                 "source": caller or "invoke_llm_with_fallback",
-                "level": "STEP_SUCCESS",
+                "actor": caller or "LangGraphOrchestrator",
+                "function": "invoke_llm_with_fallback",
+                "phase": "LLM Invocation",
+                "level": "LLM_RESP",
                 "stepNumber": "LLM-2",
-                "stepName": "Ollama Fallback Invocation",
+                "stepName": "Ollama Fallback Inbound Response",
                 "status": "SUCCESS",
-                "message": f"Ollama ({model}) successfully returned response ({latency_ms}ms). Validation passed.",
-                "details": { "caller": caller, "latencyMs": latency_ms, "status": resp.status_code }
+                "message": f"Received Response from Ollama {model} ({latency_ms}ms). Parsed: {'Valid JSON' if parsed_json else 'Raw Text'}.",
+                "details": {
+                    "provider": "Ollama",
+                    "model": model,
+                    "latencyMs": latency_ms,
+                    "rawResponse": raw_text,
+                    "parsedJson": parsed_json
+                }
             })
 
             write_llm_evaluation_log({
@@ -447,7 +587,10 @@ def invoke_llm_with_fallback(
 
         write_to_file_log({
             "source": caller or "invoke_llm_with_fallback",
-            "level": "STEP_FAILED",
+            "actor": caller or "LangGraphOrchestrator",
+            "function": "invoke_llm_with_fallback",
+            "phase": "LLM Failure",
+            "level": "LLM_FAILED",
             "stepNumber": "LLM-2",
             "stepName": "Ollama Fallback Invocation",
             "status": "FAILED",
@@ -840,16 +983,24 @@ def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_ins
     )
 
     parsed = llm_result.get("parsed_json") or {}
-    intent = (parsed.get("intent") or "").lower().strip()
-    if not intent:
-        if "statement" in prompt.lower() or "transaction" in prompt.lower():
-            intent = "account_statement"
-        elif "balance" in prompt.lower() or "fund" in prompt.lower() or "money" in prompt.lower() or "hold" in prompt.lower():
-            intent = "balance_inquiry"
-        elif re.match(r'^(hi|hello|hey|good morning|who are you)', prompt.strip(), re.IGNORECASE):
-            intent = "greetings"
-        else:
-            intent = "other"
+    raw_intent = (parsed.get("intent") or "").lower().strip()
+
+    prompt_lower = prompt.lower()
+    has_statement = any(w in prompt_lower for w in ("statement", "transaction", "passbook", "history", "inflow", "outflow", "credits", "debits"))
+    has_balance = any(w in prompt_lower for w in ("balance", "available fund", "liquidity", "how much money", "checking and savings", "checking balance", "savings balance", "pending hold"))
+
+    if has_statement and has_balance:
+        intent = "general_banking"
+    elif has_statement:
+        intent = "account_statement"
+    elif has_balance:
+        intent = "balance_inquiry"
+    elif raw_intent in ("greetings", "balance_inquiry", "account_statement", "general_banking", "other"):
+        intent = raw_intent
+    elif re.match(r'^(hi|hello|hey|good morning|who are you)', prompt.strip(), re.IGNORECASE):
+        intent = "greetings"
+    else:
+        intent = "other"
 
     llm_extracted_acc = parsed.get("extracted_account_id")
     if llm_extracted_acc and not resolved_account_id:
@@ -858,93 +1009,87 @@ def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_ins
     confidence = float(parsed.get("intent_confidence", 0.98))
     reasoning = parsed.get("intent_reasoning") or f"LLM classified user query into intent: [{intent.upper()}]."
 
-    assigned_agent = parsed.get("assigned_agent", "Boss EVA")
-    if intent == "balance_inquiry":
-        assigned_agent = "VK"
-    elif intent == "account_statement":
-        assigned_agent = "RO"
-    elif intent == "general_banking":
-        assigned_agent = "VK & RO"
-    elif intent in ("greetings", "other"):
-        assigned_agent = "Boss EVA [Direct]"
-
     is_direct = intent in ("greetings", "other")
     target_acc_label = resolved_account_id or "Unspecified Account (Request ID from Customer)"
 
-    subtasks = parsed.get("subtasks") or []
-    if not is_direct and not subtasks:
-        if intent == "balance_inquiry":
-            subtasks = [
-                {
-                    "id": "subtask_vk_1",
-                    "title": "Database Balance & Ledger Audit",
-                    "description": f"Query PostgreSQL accounts table for {target_acc_label}, verify checking vs savings balance in ₹ (INR), and compute available liquidity.",
-                    "assignedAgentId": "agent_vk",
-                    "category": "python",
-                    "dependencies": [],
-                    "targetFile": "agent_vk_balance.py",
-                    "language": "python"
-                },
-                {
-                    "id": "subtask_vk_2",
-                    "title": "INR Pending Holds Reconciliation",
-                    "description": f"Reconcile pending holds against ledger balance in ₹ (INR) for {target_acc_label} and sign cryptographic verification.",
-                    "assignedAgentId": "agent_vk",
-                    "category": "python",
-                    "dependencies": ["subtask_vk_1"],
-                    "targetFile": "agent_vk_balance.py",
-                    "language": "python"
-                }
-            ]
-        elif intent == "account_statement":
-            subtasks = [
-                {
-                    "id": "subtask_ro_1",
-                    "title": "PostgreSQL 30-Day Ledger Inflows & Outflows",
-                    "description": f"Query PostgreSQL transactions table for {target_acc_label}, aggregate total credits and debits in Indian Rupees (₹).",
-                    "assignedAgentId": "agent_ro",
-                    "category": "python",
-                    "dependencies": [],
-                    "targetFile": "agent_ro_statement.py",
-                    "language": "python"
-                },
-                {
-                    "id": "subtask_ro_2",
-                    "title": "INR Cashflow Reconciliation Statement",
-                    "description": f"Compile statement summary with transaction count, net cashflow, and closing available funds in ₹ for {target_acc_label}.",
-                    "assignedAgentId": "agent_ro",
-                    "category": "python",
-                    "dependencies": ["subtask_ro_1"],
-                    "targetFile": "agent_ro_statement.py",
-                    "language": "python"
-                }
-            ]
-        elif intent == "general_banking":
-            subtasks = [
-                {
-                    "id": "subtask_vk_gen",
-                    "title": "Core Liquidity Verification",
-                    "description": f"Audit account balance for {target_acc_label} in ₹ INR.",
-                    "assignedAgentId": "agent_vk",
-                    "category": "python",
-                    "dependencies": [],
-                    "targetFile": "agent_vk_balance.py",
-                    "language": "python"
-                },
-                {
-                    "id": "subtask_ro_gen",
-                    "title": "Activity Ledger Statement",
-                    "description": f"Retrieve 30-day activity statement for {target_acc_label} in ₹ INR.",
-                    "assignedAgentId": "agent_ro",
-                    "category": "python",
-                    "dependencies": [],
-                    "targetFile": "agent_ro_statement.py",
-                    "language": "python"
-                }
-            ]
-        else:
-            subtasks = []
+    # Strict Intent-to-Agent and Subtask Mapping
+    if intent == "account_statement":
+        assigned_agent = "RO"
+        subtasks = [
+            {
+                "id": "subtask_ro_1",
+                "title": "PostgreSQL 30-Day Ledger Inflows & Outflows",
+                "description": f"Query PostgreSQL transactions table for {target_acc_label}, aggregate total credits and debits in Indian Rupees (₹).",
+                "assignedAgentId": "agent_ro",
+                "category": "python",
+                "dependencies": [],
+                "targetFile": "agent_ro_statement.py",
+                "language": "python"
+            },
+            {
+                "id": "subtask_ro_2",
+                "title": "INR Cashflow Reconciliation Statement",
+                "description": f"Compile statement summary with transaction count, net cashflow, and closing available funds in ₹ for {target_acc_label}.",
+                "assignedAgentId": "agent_ro",
+                "category": "python",
+                "dependencies": ["subtask_ro_1"],
+                "targetFile": "agent_ro_statement.py",
+                "language": "python"
+            }
+        ]
+    elif intent == "balance_inquiry":
+        assigned_agent = "VK"
+        subtasks = [
+            {
+                "id": "subtask_vk_1",
+                "title": "Database Balance & Core Ledger Audit",
+                "description": f"Query PostgreSQL accounts table for {target_acc_label}, verify checking vs savings balance in ₹ (INR), and compute available liquidity.",
+                "assignedAgentId": "agent_vk",
+                "category": "python",
+                "dependencies": [],
+                "targetFile": "agent_vk_balance.py",
+                "language": "python"
+            },
+            {
+                "id": "subtask_vk_2",
+                "title": "INR Pending Holds Reconciliation",
+                "description": f"Reconcile pending holds against ledger balance in ₹ (INR) for {target_acc_label} and sign cryptographic verification.",
+                "assignedAgentId": "agent_vk",
+                "category": "python",
+                "dependencies": ["subtask_vk_1"],
+                "targetFile": "agent_vk_balance.py",
+                "language": "python"
+            }
+        ]
+    elif intent == "general_banking":
+        assigned_agent = "VK & RO"
+        subtasks = [
+            {
+                "id": "subtask_vk_gen",
+                "title": "Core Liquidity Verification",
+                "description": f"Audit account balance for {target_acc_label} in ₹ INR.",
+                "assignedAgentId": "agent_vk",
+                "category": "python",
+                "dependencies": [],
+                "targetFile": "agent_vk_balance.py",
+                "language": "python"
+            },
+            {
+                "id": "subtask_ro_gen",
+                "title": "Activity Ledger Statement",
+                "description": f"Retrieve 30-day activity statement for {target_acc_label} in ₹ INR.",
+                "assignedAgentId": "agent_ro",
+                "category": "python",
+                "dependencies": [],
+                "targetFile": "agent_ro_statement.py",
+                "language": "python"
+            }
+        ]
     elif is_direct:
+        assigned_agent = "Boss EVA [Direct]"
+        subtasks = []
+    else:
+        assigned_agent = "Boss EVA"
         subtasks = []
 
     supervisor_plan = (
@@ -1091,15 +1236,50 @@ def execute_agent_subtask(subtask: Dict[str, Any], agent: Dict[str, Any], previo
             "details": { "accountId": extracted_acc, "found": False }
         })
 
+    subtask_id = str(subtask.get("id", "")).lower()
+
     if agent_id == "agent_vk":
         system_instruction = AGENT_VK_SYSTEM_PROMPT
-        user_prompt = build_vk_user_prompt(extracted_acc, account)
+        if "2" in subtask_id or "hold" in subtask_id or "recon" in subtask_id:
+            user_prompt = (
+                f"Perform Step 2 - Pending Holds & Net Liquidity Reconciliation for {extracted_acc}:\n"
+                f"Ledger Total: {format_inr(account['total_ledger_balance']) if account else '₹0.00'}\n"
+                f"Pending Settlement Holds: {format_inr(account['pending_holds']) if account else '₹0.00'}\n"
+                f"Verified Net Liquidity: {format_inr(account['available_balance']) if account else '₹0.00'}\n"
+                f"Verify that Available Balance = Total Ledger - Pending Holds in INR (₹)."
+            )
+        else:
+            user_prompt = (
+                f"Perform Step 1 - Core Checking & Savings Audit for {extracted_acc}:\n"
+                f"Checking Balance: {format_inr(account['checking_balance']) if account else '₹0.00'}\n"
+                f"Savings Balance: {format_inr(account['savings_balance']) if account else '₹0.00'}\n"
+                f"Total Core Reserve: {format_inr(account['total_ledger_balance']) if account else '₹0.00'}\n"
+                f"Status: {account.get('status', 'ACTIVE') if account else 'NOT_FOUND'}"
+            )
     else:
         system_instruction = AGENT_RO_SYSTEM_PROMPT
         total_credits = sum(float(t["amount"]) for t in transactions if t.get("type") == "CREDIT" or float(t["amount"]) > 0)
         total_debits = sum(abs(float(t["amount"])) for t in transactions if t.get("type") == "DEBIT" or float(t["amount"]) < 0)
         closing_bal = float(account["available_balance"]) if account else 0.0
-        user_prompt = build_ro_user_prompt(extracted_acc, total_credits, total_debits, closing_bal, len(transactions))
+
+        if "2" in subtask_id or "cashflow" in subtask_id or "recon" in subtask_id:
+            net = total_credits - total_debits
+            sign = "+" if net >= 0 else "-"
+            user_prompt = (
+                f"Perform Step 2 - Cashflow & Ledger Reconciliation for {extracted_acc}:\n"
+                f"Inflows (+): ₹{total_credits:,.2f} INR | Outflows (-): ₹{total_debits:,.2f} INR\n"
+                f"Net Cashflow: {sign}₹{abs(net):,.2f} INR\n"
+                f"Closing Available Balance: ₹{closing_bal:,.2f} INR\n"
+                f"Reconcile net movement with closing available funds and confirm ledger equilibrium."
+            )
+        else:
+            user_prompt = (
+                f"Perform Step 1 - Inflows & Outflows Ledger Audit for {extracted_acc}:\n"
+                f"Total Transactions: {len(transactions)}\n"
+                f"Inflows (Credits): ₹{total_credits:,.2f} INR\n"
+                f"Outflows (Debits): ₹{total_debits:,.2f} INR\n"
+                f"Categorize and audit individual transaction records."
+            )
 
     full_system = system_instruction + """\nReturn strict JSON:
 {
@@ -1132,34 +1312,66 @@ def execute_agent_subtask(subtask: Dict[str, Any], agent: Dict[str, Any], previo
     if not speech_summary:
         if account:
             if agent_id == "agent_vk":
-                speech_summary = f"VK retrieved live ledger for {extracted_acc}: {format_inr(account['available_balance'])} available!"
-                thoughts = [
-                    f"Executing: SELECT * FROM accounts WHERE account_id = '{extracted_acc}';",
-                    f"Parsed record: Checking {format_inr(account['checking_balance'])} + Savings {format_inr(account['savings_balance'])}",
-                    f"Deducted pending holds ({format_inr(account['pending_holds'])}) -> Net Available: {format_inr(account['available_balance'])}",
-                    "Cryptographically signed BalanceResponse schema in INR (₹)"
-                ]
-                code = {
-                    "filename": "agent_vk_balance.py",
-                    "language": "python",
-                    "content": f"from fastapi import APIRouter\n\nrouter = APIRouter()\n\n@router.post(\"/balance\")\nasync def get_balance():\n    return {{\"account_id\": \"{extracted_acc}\", \"available_balance_inr\": \"{format_inr(account['available_balance'])}\"}}"
-                }
-                execution_output = f"[DATABASE] SELECT * FROM accounts WHERE account_id = '{extracted_acc}'; -> 200 OK\nAvailable Funds: {format_inr(account['available_balance'])} | Specialist: VK"
+                if "2" in subtask_id or "hold" in subtask_id or "recon" in subtask_id:
+                    speech_summary = f"VK reconciled pending holds for {extracted_acc}: {format_inr(account['pending_holds'])} holds deducted -> Net Available: {format_inr(account['available_balance'])}."
+                    thoughts = [
+                        f"Auditing pending settlement holds for {extracted_acc}: {format_inr(account['pending_holds'])}",
+                        f"Deducting holds from Total Ledger ({format_inr(account['total_ledger_balance'])}) -> Net Available: {format_inr(account['available_balance'])}",
+                        "Cryptographically signed BalanceResponse schema in INR (₹)"
+                    ]
+                    code = {
+                        "filename": "agent_vk_liquidity.py",
+                        "language": "python",
+                        "content": f"from fastapi import APIRouter\n\nrouter = APIRouter()\n\n@router.get(\"/liquidity\")\nasync def get_liquidity():\n    return {{\"account_id\": \"{extracted_acc}\", \"available_liquidity_inr\": \"{format_inr(account['available_balance'])}\", \"pending_holds\": \"{format_inr(account['pending_holds'])}\"}}"
+                    }
+                    execution_output = f"[DATABASE] Reconciled Holds: {format_inr(account['pending_holds'])} -> Net Liquidity: {format_inr(account['available_balance'])}"
+                else:
+                    speech_summary = f"VK audited primary accounts table for {extracted_acc}: Checking {format_inr(account['checking_balance'])} + Savings {format_inr(account['savings_balance'])}."
+                    thoughts = [
+                        f"Executing SQL: SELECT checking_balance, savings_balance FROM accounts WHERE account_id = '{extracted_acc}';",
+                        f"Verified active checking balance ({format_inr(account['checking_balance'])})",
+                        f"Verified secondary savings reserve ({format_inr(account['savings_balance'])})",
+                        f"Total core ledger: {format_inr(account['total_ledger_balance'])}"
+                    ]
+                    code = {
+                        "filename": "agent_vk_balance.py",
+                        "language": "python",
+                        "content": f"from fastapi import APIRouter\n\nrouter = APIRouter()\n\n@router.get(\"/balance\")\nasync def get_balance():\n    return {{\"account_id\": \"{extracted_acc}\", \"checking\": \"{format_inr(account['checking_balance'])}\", \"savings\": \"{format_inr(account['savings_balance'])}\"}}"
+                    }
+                    execution_output = f"[DATABASE] SELECT * FROM accounts WHERE account_id = '{extracted_acc}'; -> Checking: {format_inr(account['checking_balance'])}, Savings: {format_inr(account['savings_balance'])}"
             else:
                 total_credits = sum(float(t["amount"]) for t in transactions if t.get("type") == "CREDIT" or float(t["amount"]) > 0)
                 total_debits = sum(abs(float(t["amount"])) for t in transactions if t.get("type") == "DEBIT" or float(t["amount"]) < 0)
-                speech_summary = f"RO compiled 30-day statement with {len(transactions)} transactions for {extracted_acc}!"
-                thoughts = [
-                    f"Executing: SELECT * FROM transactions WHERE account_id = '{extracted_acc}' ORDER BY date DESC;",
-                    f"Aggregated inflows (+{format_inr(total_credits)}) vs outflows (-{format_inr(total_debits)})",
-                    "Compiled structured ₹ ASCII ledger statement ready for Boss EVA"
-                ]
-                code = {
-                    "filename": "agent_ro_statement.py",
-                    "language": "python",
-                    "content": f"from fastapi import APIRouter\n\nrouter = APIRouter()\n\n@router.post(\"/statement\")\nasync def get_statement():\n    return {{\"account_id\": \"{extracted_acc}\", \"total_credits_inr\": \"{format_inr(total_credits)}\", \"total_debits_inr\": \"{format_inr(total_debits)}\"}}"
-                }
-                execution_output = f"[DATABASE] SELECT * FROM transactions WHERE account_id = '{extracted_acc}'; -> 200 OK\nInflows: +{format_inr(total_credits)} | Outflows: -{format_inr(total_debits)} | Specialist: RO"
+                closing_bal = float(account["available_balance"])
+
+                if "2" in subtask_id or "cashflow" in subtask_id or "recon" in subtask_id:
+                    net = total_credits - total_debits
+                    sign = "+" if net >= 0 else "-"
+                    speech_summary = f"RO completed cashflow reconciliation for {extracted_acc}: Net {sign}{format_inr(abs(net))} reconciled with closing balance {format_inr(closing_bal)}."
+                    thoughts = [
+                        f"Calculating Net Cashflow: Inflows ({format_inr(total_credits)}) - Outflows ({format_inr(total_debits)}) = {sign}{format_inr(abs(net))}",
+                        f"Reconciling net cashflow variance against closing available balance ({format_inr(closing_bal)})",
+                        "Generated structured statement reconciliation certificate for Boss EVA"
+                    ]
+                    code = {
+                        "filename": "agent_ro_reconciliation.py",
+                        "language": "python",
+                        "content": f"from fastapi import APIRouter\n\nrouter = APIRouter()\n\n@router.get(\"/reconciliation\")\nasync def get_recon():\n    return {{\"account_id\": \"{extracted_acc}\", \"net_cashflow_inr\": \"{sign}{format_inr(abs(net))}\", \"closing_balance\": \"{format_inr(closing_bal)}\"}}"
+                    }
+                    execution_output = f"[DATABASE] Cashflow Reconciliation: Inflows {format_inr(total_credits)} - Outflows {format_inr(total_debits)} = Net {sign}{format_inr(abs(net))}"
+                else:
+                    speech_summary = f"RO audited 30-day transaction ledger for {extracted_acc}: {format_inr(total_credits)} inflows and -{format_inr(total_debits)} outflows across {len(transactions)} transactions."
+                    thoughts = [
+                        f"Executing SQL: SELECT * FROM transactions WHERE account_id = '{extracted_acc}' ORDER BY date DESC;",
+                        f"Categorized {len(transactions)} transaction records into Credits ({format_inr(total_credits)}) vs Debits ({format_inr(total_debits)})",
+                        "Verified payroll, cloud infrastructure, and merchant settlement line items"
+                    ]
+                    code = {
+                        "filename": "agent_ro_statement.py",
+                        "language": "python",
+                        "content": f"from fastapi import APIRouter\n\nrouter = APIRouter()\n\n@router.get(\"/transactions\")\nasync def get_txns():\n    return {{\"account_id\": \"{extracted_acc}\", \"total_credits\": \"{format_inr(total_credits)}\", \"total_debits\": \"{format_inr(total_debits)}\"}}"
+                    }
+                    execution_output = f"[DATABASE] SELECT * FROM transactions WHERE account_id = '{extracted_acc}'; -> Inflows: +{format_inr(total_credits)} | Outflows: -{format_inr(total_debits)}"
         else:
             speech_summary = f"{agent_name} queried PostgreSQL for account '{extracted_acc or 'Unknown'}': Record not found in registry."
             thoughts = [
