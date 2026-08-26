@@ -63,7 +63,16 @@ def build_synthesis_user_prompt(
         )
 
     if specialist_output:
-        parts.append(f"\n[Specialist Sub-Agent Execution Context]:\n{json.dumps(specialist_output, default=str, indent=2)}")
+        sub_results = specialist_output.get("subtaskResults") or []
+        if isinstance(sub_results, list) and sub_results:
+            summaries = []
+            for idx, st in enumerate(sub_results):
+                if isinstance(st, dict):
+                    speech = st.get("speechSummary") or st.get("executionOutput") or ""
+                    if speech:
+                        summaries.append(f"- Specialist Finding {idx+1}: {speech.strip()}")
+            if summaries:
+                parts.append(f"\n[Specialist Sub-Agent Verified Findings]:\n" + "\n".join(summaries))
 
-    parts.append("\nPlease synthesize the final verified customer response in Indian Rupees (₹ / INR).")
+    parts.append("\nPlease synthesize a concise, authoritative executive banking response in Indian Rupees (₹ / INR). Keep the response under 150 words.")
     return "\n".join(parts)

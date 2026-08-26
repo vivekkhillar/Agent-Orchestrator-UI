@@ -37,6 +37,7 @@ logger = logging.getLogger("LangGraphBankingOrchestrator")
 # Configuration
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi3:mini")
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "180.0"))
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgrespassword@localhost:5432/banking_db")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
@@ -129,13 +130,33 @@ def extract_account_id_from_text(text: Optional[str]) -> Optional[str]:
 
 
 # ====================================================================
-# 1. FILE & DATABASE AUDIT LOGGERS
+# 1. FILE & DATABASE AUDIT LOGGERS (BATCH-TRACKED)
 # ====================================================================
 
-def write_to_file_log(entry: Dict[str, Any]) -> None:
-    """Appends structured audit log to logs/banking_audit.log."""
+import contextvars
+
+_current_batch_id_ctx = contextvars.ContextVar("current_batch_id", default=None)
+
+def set_current_batch_id(batch_id: Optional[str] = None) -> str:
+    """Sets the active execution batch ID for tracking a unified run lifecycle."""
+    if not batch_id:
+        batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{int(time.time()*1000)%1000:03d}"
+    _current_batch_id_ctx.set(batch_id)
+    return batch_id
+
+def get_current_batch_id() -> str:
+    """Retrieves the active batch ID or creates a fallback."""
+    bid = _current_batch_id_ctx.get()
+    if not bid:
+        bid = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{int(time.time()*1000)%1000:03d}"
+        _current_batch_id_ctx.set(bid)
+    return bid
+
+def write_to_file_log(entry: Dict[str, Any], batch_id: Optional[str] = None) -> None:
+    """Appends structured audit log to logs/banking_audit.log with tracking batch_id."""
     try:
         ts = entry.get("timestamp") or get_ist_timestamp()
+        bid = batch_id or entry.get("batch_id") or entry.get("batchId") or get_current_batch_id()
         level = entry.get("level", "INFO")
         source = entry.get("source", "System")
         step_num = entry.get("stepNumber", "")
@@ -143,23 +164,31 @@ def write_to_file_log(entry: Dict[str, Any]) -> None:
         status = entry.get("status", "")
         message = entry.get("message", "")
         details = entry.get("details", {})
+        if isinstance(details, dict) and "batch_id" not in details and "batchId" not in details:
+            details["batch_id"] = bid
         
+        batch_str = f" [BATCH: {bid}]" if bid else ""
         step_header = f"[STEP {step_num}: {step_name}] " if step_num or step_name else ""
         status_suffix = f" [STATUS: {status}]" if status else ""
         details_str = f" | Details: {json.dumps(details)}" if details else ""
         
-        log_line = f"[{ts}] [{level}] [{source}] {step_header}{message}{status_suffix}{details_str}\n"
+        log_line = f"[{ts}]{batch_str} [{level}] [{source}] {step_header}{message}{status_suffix}{details_str}\n"
         with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(log_line)
     except Exception as e:
         logger.warning(f"File log error: {e}")
 
 
-def write_llm_evaluation_log(entry: Dict[str, Any]) -> None:
-    """Appends LLM request/response evaluation to logs/llm_invocations.log."""
+def write_llm_evaluation_log(entry: Dict[str, Any], batch_id: Optional[str] = None) -> None:
+    """Appends LLM request/response evaluation to logs/llm_invocations.log with batch_id."""
     try:
+        bid = batch_id or entry.get("batch_id") or entry.get("batchId") or get_current_batch_id()
+        entry_with_batch = {
+            "batch_id": bid,
+            **entry
+        }
         with open(LLM_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+            f.write(json.dumps(entry_with_batch) + "\n")
     except Exception as e:
         logger.warning(f"LLM log error: {e}")
 
@@ -206,7 +235,8 @@ def invoke_llm_with_fallback(
     temperature: float = 0.1,
     ollama_endpoint: Optional[str] = None,
     ollama_model: Optional[str] = None,
-    caller: Optional[str] = "LangGraphOrchestrator"
+    caller: Optional[str] = "LangGraphOrchestrator",
+    timeout: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Executes LLM call with strict 2-tier fallback:
@@ -218,6 +248,8 @@ def invoke_llm_with_fallback(
     endpoint = (ollama_endpoint or OLLAMA_BASE_URL).rstrip("/")
     model = ollama_model or OLLAMA_MODEL or "phi3:mini"
     timestamp = get_ist_timestamp()
+    default_read_timeout = float(os.getenv("OLLAMA_TIMEOUT", str(OLLAMA_TIMEOUT)))
+    read_timeout = timeout if timeout is not None else default_read_timeout
 
     raw_request = {
         "timestamp": timestamp,
@@ -333,18 +365,21 @@ def invoke_llm_with_fallback(
         })
 
         ollama_url = f"{endpoint}/api/generate"
+        max_tokens = 350 if caller and "Synthesize" in caller else (200 if json_mode else 300)
         payload = {
             "model": model,
             "prompt": user_prompt,
             "system": system_prompt,
             "stream": False,
-            "options": {"temperature": temperature}
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens
+            }
         }
         if json_mode:
             payload["format"] = "json"
 
-        read_timeout = float(os.getenv("OLLAMA_TIMEOUT", "120.0"))
-        resp = requests.post(ollama_url, json=payload, timeout=(5.0, read_timeout))
+        resp = requests.post(ollama_url, json=payload, timeout=(3.0, read_timeout))
         latency_ms = int((time.time() - start_time) * 1000)
 
         if resp.status_code == 200:
@@ -648,9 +683,13 @@ def log_intent_to_postgres(query_text: str, intent: str, confidence: float, reas
         logger.debug(f"Intent classification log to PG bypassed: {e}")
 
 
-def log_audit_to_postgres(log_id: str, agent_id: str, agent_name: str, agent_role: str, log_type: str, message: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-    """Records audit log into PostgreSQL audit_logs table."""
+def log_audit_to_postgres(log_id: str, agent_id: str, agent_name: str, agent_role: str, log_type: str, message: str, metadata: Optional[Dict[str, Any]] = None, batch_id: Optional[str] = None) -> None:
+    """Records audit log into PostgreSQL audit_logs table with batch_id."""
     try:
+        bid = batch_id or get_current_batch_id()
+        meta = metadata.copy() if metadata else {}
+        if "batch_id" not in meta:
+            meta["batch_id"] = bid
         conn = psycopg2.connect(DATABASE_URL, connect_timeout=3)
         cur = conn.cursor()
         cur.execute(
@@ -658,7 +697,7 @@ def log_audit_to_postgres(log_id: str, agent_id: str, agent_name: str, agent_rol
             INSERT INTO audit_logs (log_id, agent_id, agent_name, agent_role, log_type, message, metadata)
             VALUES (%s, %s, %s, %s, %s, %s, %s);
             """,
-            (log_id, agent_id, agent_name, agent_role, log_type, message, json.dumps(metadata or {}))
+            (log_id, agent_id, agent_name, agent_role, log_type, message, json.dumps(meta))
         )
         conn.commit()
         cur.close()
@@ -667,10 +706,12 @@ def log_audit_to_postgres(log_id: str, agent_id: str, agent_name: str, agent_rol
         logger.debug(f"Audit log to PG bypassed: {e}")
 
 
-def log_agent_activity_to_postgres(activity: Dict[str, Any]) -> Dict[str, Any]:
-    """Records live agent activity into PostgreSQL agent_activities table and in-memory cache."""
+def log_agent_activity_to_postgres(activity: Dict[str, Any], batch_id: Optional[str] = None) -> Dict[str, Any]:
+    """Records live agent activity into PostgreSQL agent_activities table and in-memory cache with batch_id."""
+    bid = batch_id or activity.get("batch_id") or get_current_batch_id()
     record = {
         "activity_id": activity.get("activity_id") or f"ACT-{int(time.time()*1000)}",
+        "batch_id": bid,
         "agent_id": activity.get("agent_id", "agent_supervisor"),
         "agent_name": activity.get("agent_name", "Boss EVA"),
         "agent_role": activity.get("agent_role", "Lead Floor Orchestrator"),
@@ -758,13 +799,16 @@ def get_agent_activities_from_postgres(limit: int = 50) -> List[Dict[str, Any]]:
 # 4. ORCHESTRATION & SUBTASK EXECUTION HELPERS
 # ====================================================================
 
-def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_instructions: Optional[str] = None, ollama_endpoint: Optional[str] = None, ollama_model: Optional[str] = None) -> Dict[str, Any]:
+def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_instructions: Optional[str] = None, ollama_endpoint: Optional[str] = None, ollama_model: Optional[str] = None, batch_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Boss EVA intent classification and subtask planning logic.
     Identifies intent and extracts account number dynamically from natural language.
     """
+    bid = set_current_batch_id(batch_id)
     extracted_acc_regex = extract_account_id_from_text(prompt)
     resolved_account_id = account_id or extracted_acc_regex or None
+
+    # Request Land from frontend to orchestrator layer and process
 
     write_to_file_log({
         "source": "Boss_EVA_[LangGraph]",
@@ -774,12 +818,13 @@ def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_ins
         "status": "STARTED",
         "message": f"Received prompt: \"{prompt}\" [Extracted Account ID: {resolved_account_id or 'None in prompt'}]. Invoking 2-tier LLM pipeline.",
         "details": {
+            "batch_id": bid,
             "inputPrompt": prompt,
             "extractedAccountId": resolved_account_id,
             "accountExplicitlyProvided": bool(account_id),
             "customInstructions": custom_instructions or "none"
         }
-    })
+    }, batch_id=bid)
 
     system_instruction = INTENT_CLASSIFICATION_SYSTEM_PROMPT
     user_prompt = build_intent_user_prompt(prompt, resolved_account_id, custom_instructions or "")
@@ -951,8 +996,14 @@ def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_ins
         "status": "COMPLETED"
     })
 
+    final_subtasks = [] if is_direct else subtasks
+    for st in final_subtasks:
+        st["batch_id"] = bid
+
     return {
         "success": True,
+        "batch_id": bid,
+        "batchId": bid,
         "orchestrator": "LangGraph State Machine",
         "intent": intent,
         "intentConfidence": confidence,
@@ -960,7 +1011,7 @@ def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_ins
         "assignedAgentName": assigned_agent,
         "extractedAccountId": resolved_account_id,
         "plan": supervisor_plan,
-        "subtasks": [] if is_direct else subtasks,
+        "subtasks": final_subtasks,
         "usedEngine": llm_result["used_engine"],
         "fallbackTriggered": llm_result["fallback_triggered"],
         "rawRequest": llm_result["raw_request"],
@@ -969,6 +1020,7 @@ def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_ins
         "raw_responses": [llm_result["raw_response"]],
         "llm_invocations": [{
             "step": "intent_classification",
+            "batch_id": bid,
             "engine": llm_result["used_engine"],
             "fallbackTriggered": llm_result["fallback_triggered"],
             "latencyMs": llm_result["latency_ms"],
@@ -979,10 +1031,11 @@ def plan_orchestration(prompt: str, account_id: Optional[str] = None, custom_ins
     }
 
 
-def execute_agent_subtask(subtask: Dict[str, Any], agent: Dict[str, Any], previous_outputs: Optional[Dict[str, Any]] = None, prompt: Optional[str] = None, account_id: Optional[str] = None, ollama_endpoint: Optional[str] = None, ollama_model: Optional[str] = None) -> Dict[str, Any]:
+def execute_agent_subtask(subtask: Dict[str, Any], agent: Dict[str, Any], previous_outputs: Optional[Dict[str, Any]] = None, prompt: Optional[str] = None, account_id: Optional[str] = None, ollama_endpoint: Optional[str] = None, ollama_model: Optional[str] = None, batch_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Executes a specialist agent subtask with live PostgreSQL queries and dynamic LLM code generation.
     """
+    bid = set_current_batch_id(batch_id or subtask.get("batch_id"))
     agent_id = agent.get("id", "agent_vk")
     agent_name = agent.get("name", "Specialist")
     agent_role = agent.get("role", "Floor Specialist")
@@ -997,6 +1050,7 @@ def execute_agent_subtask(subtask: Dict[str, Any], agent: Dict[str, Any], previo
         "status": "STARTED",
         "message": f"Agent {agent_name} ({agent_role}) commenced execution of subtask [{subtask.get('title')}] [Account: {extracted_acc or 'None'}].",
         "details": {
+            "batch_id": bid,
             "agentId": agent_id,
             "agentName": agent_name,
             "subtaskId": subtask.get("id"),
@@ -1005,7 +1059,7 @@ def execute_agent_subtask(subtask: Dict[str, Any], agent: Dict[str, Any], previo
             "targetFile": subtask.get("targetFile"),
             "dependencies": subtask.get("dependencies", [])
         }
-    })
+    }, batch_id=bid)
 
     account = get_account_data(extracted_acc) if extracted_acc else None
     transactions = get_transactions_data(extracted_acc) if extracted_acc else []
@@ -1172,11 +1226,12 @@ def execute_agent_subtask(subtask: Dict[str, Any], agent: Dict[str, Any], previo
     }
 
 
-def synthesize_customer_response(intent: str, prompt: str, subtask_results: Optional[List[Dict[str, Any]]] = None, account_id: Optional[str] = None, ollama_endpoint: Optional[str] = None, ollama_model: Optional[str] = None) -> Dict[str, Any]:
+def synthesize_customer_response(intent: str, prompt: str, subtask_results: Optional[List[Dict[str, Any]]] = None, account_id: Optional[str] = None, ollama_endpoint: Optional[str] = None, ollama_model: Optional[str] = None, batch_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Boss EVA final customer synthesis.
     Synthesizes customer response using live PostgreSQL data and 2-tier LLM fallback in ₹ (INR).
     """
+    bid = set_current_batch_id(batch_id)
     extracted_acc = account_id or extract_account_id_from_text(prompt)
 
     if intent == "greetings":
@@ -1187,8 +1242,8 @@ def synthesize_customer_response(intent: str, prompt: str, subtask_results: Opti
             "stepName": "Zero-DB Greetings Synthesis",
             "status": "STARTED",
             "message": f"Boss EVA synthesizing direct greeting response in Cabin [0x1] with ZERO database access. [Account status: {f'IDENTIFIED -> {extracted_acc}' if extracted_acc else 'NONE_IN_PROMPT (Zero DB Access)'}].",
-            "details": {"accountId": extracted_acc, "intent": "greetings", "databaseAccessed": False}
-        })
+            "details": {"batch_id": bid, "accountId": extracted_acc, "intent": "greetings", "databaseAccessed": False}
+        }, batch_id=bid)
 
         system_instruction = GREETINGS_SYSTEM_PROMPT
         user_prompt = build_greetings_user_prompt(prompt, extracted_acc)
@@ -1200,7 +1255,8 @@ def synthesize_customer_response(intent: str, prompt: str, subtask_results: Opti
             temperature=0.3,
             ollama_endpoint=ollama_endpoint,
             ollama_model=ollama_model,
-            caller="Boss_EVA_[GreetingsSynthesize]"
+            caller="Boss_EVA_[GreetingsSynthesize]",
+            timeout=float(os.getenv("OLLAMA_TIMEOUT", str(OLLAMA_TIMEOUT)))
         )
 
         customer_response = llm_result.get("text") or get_fallback_greetings_response(extracted_acc)
@@ -1246,6 +1302,8 @@ def synthesize_customer_response(intent: str, prompt: str, subtask_results: Opti
 
         return {
             "success": True,
+            "batch_id": bid,
+            "batchId": bid,
             "boss_agent": "EVA [0x1]",
             "intent": "greetings",
             "database_accessed": False,
@@ -1287,24 +1345,33 @@ def synthesize_customer_response(intent: str, prompt: str, subtask_results: Opti
         temperature=0.2,
         ollama_endpoint=ollama_endpoint,
         ollama_model=ollama_model,
-        caller="Boss_EVA_[Synthesize]"
+        caller="Boss_EVA_[Synthesize]",
+        timeout=float(os.getenv("OLLAMA_TIMEOUT", str(OLLAMA_TIMEOUT)))
     )
 
     customer_response = llm_result.get("text")
     if not customer_response or customer_response.strip() == "":
+        logger.info("LLM synthesis was empty or timed out; generating high-fidelity verified response from PostgreSQL ledger...")
         if not extracted_acc:
             customer_response = "Hello! Boss EVA here. Please provide your Account ID (e.g. ACC-94820, ACC-10029, ACC-55210) so our specialists can query the PostgreSQL treasury records."
         elif not account:
             customer_response = f"Hello! Boss EVA here. We queried the PostgreSQL database for account '{extracted_acc}', but no matching record was found in our treasury ledger. Please check the account number and try again."
         elif intent == "balance_inquiry":
-            customer_response = f"Hello! Boss EVA here. Specialist VK has verified available liquidity for {extracted_acc}: {format_inr(account['available_balance'])} INR ({format_inr(account['checking_balance'])} Checking + {format_inr(account['savings_balance'])} Savings - {format_inr(account['pending_holds'])} Pending Holds). Status: Active & Verified."
+            checking = format_inr(account.get('checking_balance', 0))
+            savings = format_inr(account.get('savings_balance', 0))
+            holds = format_inr(account.get('pending_holds', 0))
+            avail = format_inr(account.get('available_balance', 0))
+            holder = account.get('account_holder', 'Account Holder')
+            customer_response = f"Hello! Boss EVA [0x1] here. Specialist VK has verified the live PostgreSQL treasury ledger for {holder} ({extracted_acc}): Total Available Liquidity is {avail} INR ({checking} Checking + {savings} Savings less {holds} in Pending Holds). All figures are active and verified in ₹ (INR)."
         elif intent == "account_statement":
             total_credits = sum(float(t["amount"]) for t in transactions if t.get("type") == "CREDIT" or float(t["amount"]) > 0)
             total_debits = sum(abs(float(t["amount"])) for t in transactions if t.get("type") == "DEBIT" or float(t["amount"]) < 0)
             net_cashflow = total_credits - total_debits
-            customer_response = f"Hello! Boss EVA here. Specialist RO has compiled the statement for {extracted_acc}: +{format_inr(total_credits)} Credits, -{format_inr(total_debits)} Debits across {len(transactions)} transactions. Net cashflow: {f'+' if net_cashflow>=0 else '-'}{format_inr(abs(net_cashflow))} INR."
+            closing_bal = format_inr(account.get('available_balance', 0)) if account else "₹0.00"
+            customer_response = f"Hello! Boss EVA [0x1] here. Specialist RO has audited the 30-day PostgreSQL statement for {extracted_acc}: Retrieved {len(transactions)} transactions with Total Inflows of +{format_inr(total_credits)} INR, Total Outflows of -{format_inr(total_debits)} INR, and Net Cashflow of {f'+' if net_cashflow>=0 else '-'}{format_inr(abs(net_cashflow))} INR. Closing available balance: {closing_bal} INR."
         else:
-            customer_response = f"Hello! I am Boss EVA [0x1], Lead Banking Orchestrator at First Digital Treasury. I have processed your inquiry for {extracted_acc} in Indian Rupees (₹)."
+            customer_response = f"Hello! I am Boss EVA [0x1], Lead Banking Orchestrator at First Digital Treasury. I have processed your inquiry for {extracted_acc or 'your request'} in Indian Rupees (₹)."
+
 
     currency_validated = "₹" in customer_response or "INR" in customer_response or "Rs" in customer_response
 
@@ -1352,6 +1419,8 @@ def synthesize_customer_response(intent: str, prompt: str, subtask_results: Opti
 
     return {
         "success": True,
+        "batch_id": bid,
+        "batchId": bid,
         "boss_agent": "EVA [0x1]",
         "intent": intent,
         "database_accessed": bool(account),

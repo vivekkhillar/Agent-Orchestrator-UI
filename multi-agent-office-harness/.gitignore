@@ -9,5 +9,8 @@ coverage/
 .venv
 venv
 logs
-.pytest_cache
-prompts/_pycache_
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+assets/*

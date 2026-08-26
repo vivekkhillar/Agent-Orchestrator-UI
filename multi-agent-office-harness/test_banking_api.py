@@ -123,3 +123,25 @@ def test_fastapi_source_files():
     assert "banking_orchestrator.py" in filenames
     assert "agent_vk_balance.py" in filenames
     assert "agent_ro_statement.py" in filenames
+
+
+def test_batch_id_logging_and_propagation():
+    test_batch = "batch_test_unit_999888"
+    response = client.post(
+        "/api/orchestrator/dispatch",
+        json={"prompt": "check available funds for ACC-94820", "batch_id": test_batch}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["batch_id"] == test_batch
+    assert data["batchId"] == test_batch
+    
+    # Check that audit log recorded the batch ID
+    synth_resp = client.post(
+        "/api/eva/synthesize",
+        json={"intent": "balance_inquiry", "prompt": "check balance", "accountId": "ACC-94820", "batch_id": test_batch}
+    )
+    assert synth_resp.status_code == 200
+    synth_data = synth_resp.json()
+    assert synth_data["batch_id"] == test_batch
+

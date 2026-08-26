@@ -33,7 +33,8 @@ import {
   Filter,
   CheckCircle,
   XCircle,
-  AlertTriangle
+  AlertTriangle,
+  Search
 } from 'lucide-react';
 
 interface CommandCenterProps {
@@ -84,6 +85,7 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
   const [promptInput, setPromptInput] = useState('');
   const [auditLogContent, setAuditLogContent] = useState<string>('');
   const [auditFilter, setAuditFilter] = useState<'ALL' | 'STEP' | 'ERROR' | 'VALIDATION' | 'LLM'>('ALL');
+  const [batchSearchFilter, setBatchSearchFilter] = useState('');
   const [isLoadingAudit, setIsLoadingAudit] = useState(false);
   const [autoRefreshAudit, setAutoRefreshAudit] = useState(true);
   const terminalEndRef = useRef<HTMLDivElement | null>(null);
@@ -161,16 +163,22 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
   // Filter audit lines safely
   const filteredAuditLines = React.useMemo(() => {
     if (!auditLogContent) return [];
-    const lines = typeof auditLogContent === 'string'
+    let lines = typeof auditLogContent === 'string'
       ? auditLogContent.split('\n').filter(Boolean)
       : (Array.isArray(auditLogContent) ? (auditLogContent as string[]).filter(Boolean) : []);
+    
+    if (batchSearchFilter.trim()) {
+      const term = batchSearchFilter.trim().toLowerCase();
+      lines = lines.filter(l => l.toLowerCase().includes(term));
+    }
+
     if (auditFilter === 'ALL') return lines;
     if (auditFilter === 'STEP') return lines.filter(l => l.includes('STEP_') || l.includes('[STEP '));
     if (auditFilter === 'ERROR') return lines.filter(l => l.includes('[ERROR]') || l.includes('STEP_FAILED') || l.includes('FAIL'));
     if (auditFilter === 'VALIDATION') return lines.filter(l => l.includes('STEP_VALIDATION') || l.includes('VALIDATED') || l.includes('Validation'));
     if (auditFilter === 'LLM') return lines.filter(l => l.includes('LLM_INVOCATION') || l.includes('LLM-'));
     return lines;
-  }, [auditLogContent, auditFilter]);
+  }, [auditLogContent, auditFilter, batchSearchFilter]);
 
   return (
     <div className="flex flex-col h-full bg-[#131b15] border-l-2 border-[#2b3e30] text-slate-100 overflow-hidden font-mono text-xs shadow-2xl">
@@ -482,7 +490,22 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({
                   {f === 'LLM' && '⚡ LLM Invocations'}
                 </button>
               ))}
-              <span className="ml-auto text-slate-500 text-[10px]">
+              {/* Batch ID / Text Search */}
+              <div className="flex items-center gap-1 bg-[#152218] border border-[#263a2b] rounded px-2 py-0.5 ml-1">
+                <Search className="w-2.5 h-2.5 text-emerald-400" />
+                <input
+                  type="text"
+                  placeholder="Filter by batch ID / keyword..."
+                  value={batchSearchFilter}
+                  onChange={e => setBatchSearchFilter(e.target.value)}
+                  className="bg-transparent border-none text-slate-200 placeholder-slate-500 focus:outline-none w-36 text-[9.5px]"
+                />
+                {batchSearchFilter && (
+                  <button onClick={() => setBatchSearchFilter('')} className="text-slate-400 hover:text-white text-[9px]">✕</button>
+                )}
+              </div>
+
+              <span className="ml-auto text-slate-500 text-[10px] whitespace-nowrap">
                 Showing {filteredAuditLines.length} lines
               </span>
             </div>

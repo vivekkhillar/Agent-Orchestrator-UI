@@ -360,10 +360,13 @@ export default function App() {
       message: `[Boss EVA @ Cabin 0x1] Received task: "${prompt}". Dispatching to FastAPI Orchestrator for intent classification and parameter extraction.`
     });
 
+    const batchId = `batch_${new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14)}_${Math.floor(Math.random() * 900 + 100)}`;
+
     try {
-      // 2. Call FastAPI backend orchestrator directly
+      // 2. Call FastAPI backend orchestrator directly with tracking batchId
       const orchData = await safeJsonPost('/api/orchestrator/dispatch', {
-        prompt
+        prompt,
+        batch_id: batchId
       });
 
       if (!orchData || orchData.success === false) {
@@ -533,7 +536,8 @@ export default function App() {
             subtask,
             agent: assignedAgent,
             prompt,
-            accountId: extractedAccountId
+            accountId: extractedAccountId,
+            batch_id: batchId
           });
 
           subtaskResults.push(execData);
@@ -732,7 +736,8 @@ export default function App() {
         intent: identifiedIntent,
         prompt,
         subtaskResults,
-        accountId: extractedAccountId
+        accountId: extractedAccountId,
+        batch_id: batchId
       });
 
       const finalMsg = synthRes?.customer_response || "Inquiry processed successfully by First Digital Treasury.";
