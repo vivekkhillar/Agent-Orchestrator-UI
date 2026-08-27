@@ -218,6 +218,69 @@ sequenceDiagram
 
 ---
 
+## 📦 Requirements & Libraries Specification
+
+### 1. 🐍 Python Backend Dependencies (`requirements.txt`)
+
+Install all backend dependencies via:
+```bash
+pip install -r requirements.txt
+```
+
+| Library / Package | Version Spec | Purpose in this Architecture |
+| :--- | :--- | :--- |
+| **`fastapi`** | `>=0.110.0` | Asynchronous REST API framework powering the Gateway and agent routers. |
+| **`uvicorn[standard]`** | `>=0.28.0` | Production ASGI web server running FastAPI on port 8000 with auto-reload. |
+| **`pydantic`** | `>=2.6.0` | High-performance schema validation, serialization, and type safety. |
+| **`psycopg2-binary`** | `>=2.9.9` | Low-latency PostgreSQL driver for live querying of accounts & transaction ledgers. |
+| **`google-genai`** | `>=0.1.1` | Official Google GenAI SDK for primary Tier-1 Gemini 3.7 Flash LLM invocations. |
+| **`requests`** | `>=2.31.0` | HTTP client for Tier-2 local Ollama (`phi3:mini`) fallback REST requests. |
+| **`python-dotenv`** | `>=1.0.0` | Environment variable loader from root `.env` configuration file. |
+| **`langgraph`** | `>=0.2.0` | StateGraph workflow coordinator for multi-agent floor task orchestration. |
+| **`langchain-core`** | `>=0.3.0` | Base agent schema definitions and message abstractions. |
+| **`pytest`** | `>=8.0.0` | Test runner for executing the 11-step end-to-end API test suite. |
+| **`httpx`** | `>=0.27.0` | Async HTTP test client utilized by pytest for synchronous & async endpoint tests. |
+
+---
+
+### 2. 💻 Node.js & React Frontend Dependencies (`package.json`)
+
+Install all frontend dependencies via:
+```bash
+npm install
+```
+
+#### Runtime Packages:
+| Package | Version | Purpose in Visual Office UI |
+| :--- | :--- | :--- |
+| **`react`** & **`react-dom`** | `^19.0.1` | React 19 UI component tree and state management. |
+| **`express`** | `^4.21.2` | Node.js web server serving Vite middleware on port 3000. |
+| **`lucide-react`** | `^0.546.0` | Icon set for badges, action buttons, agent roles, and status indicators. |
+| **`motion`** | `^12.23.24` | Animation engine for dynamic transitions and layout state changes. |
+| **`html2canvas`** | `^1.4.1` | Renders HTML elements into raster canvas for statement exports. |
+| **`jspdf`** | `^4.2.1` | Generates downloadable PDF statements formatted in Indian Rupees (₹). |
+| **`pg`** | `^8.23.0` | PostgreSQL client for Node.js gateway connectivity. |
+| **`dotenv`** | `^17.2.3` | Loads environment configurations into the Express process. |
+
+#### Tooling & Developer Packages:
+| Package | Version | Purpose |
+| :--- | :--- | :--- |
+| **`vite`** & **`@vitejs/plugin-react`** | `^6.2.3` / `^5.0.4` | Next-generation frontend build tool with instantaneous HMR. |
+| **`typescript`** | `~5.8.2` | Static type checking and strict compiler validation (`tsc --noEmit`). |
+| **`tsx`** | `^4.21.0` | TypeScript script runner for executing `server.ts` without precompilation. |
+| **`tailwindcss`** & **`@tailwindcss/vite`** | `^4.1.14` | Modern CSS styling tokens, gradients, and layout utilities. |
+
+---
+
+### 3. 🗄️ Infrastructure & External Services
+
+| Service | Port | Technology | Purpose |
+| :--- | :--- | :--- | :--- |
+| **PostgreSQL** | `5432` | PostgreSQL 16 (Docker) | Stores `accounts`, `transactions`, `audit_logs`, and `agent_activities`. |
+| **Local Ollama** *(Optional)* | `11434` | Ollama (`phi3:mini`) | Offline local LLM fallback when Gemini key is absent or rate-limited. |
+
+---
+
 ## 🚀 Step-by-Step Running Guide
 
 ### Step 1: Start PostgreSQL Database (Docker)
@@ -226,7 +289,17 @@ sequenceDiagram
 docker compose -f docker-compose.db.yml up -d
 ```
 
-### Step 2: Configure Environment Variables
+### Step 2: Install Dependencies
+
+```bash
+# Python backend
+pip install -r requirements.txt
+
+# Node.js frontend
+npm install
+```
+
+### Step 3: Configure Environment Variables
 
 Ensure your `.env` contains:
 ```env
@@ -237,7 +310,7 @@ OLLAMA_MODEL=phi3:mini
 OLLAMA_TIMEOUT=180.0
 ```
 
-### Step 3: Start the Complete System (One Command)
+### Step 4: Start the Complete System (One Command)
 
 Launch both the FastAPI backend (Port 8000) and the Vite frontend (Port 3000) simultaneously:
 
